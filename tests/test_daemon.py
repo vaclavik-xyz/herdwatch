@@ -1,7 +1,7 @@
 # tests/test_daemon.py
 from herdwatch.daemon import Daemon, SOURCE
 from herdwatch.gitctx import GitInfo
-from herdwatch.models import Pending
+from herdwatch.models import Pending, WorktreeHead
 
 class FakeClient:
     def __init__(self, agents, report_ok=True, release_ok=True):
@@ -30,6 +30,22 @@ _ENRICH = lambda cwd: GitInfo(True, "sha", "main", True)
 
 def _agent(pane="w1:p1", status="idle"):
     return {"pane_id": pane, "agent_status": status, "agent": "claude", "cwd": "/x"}
+
+def test_context_carries_worktree_heads_to_probes():
+    heads = (WorktreeHead(head_sha="sha", branch="main"),
+             WorktreeHead(head_sha="wt", branch="feat/x"))
+    seen = []
+    class Capture:
+        name = "capture"
+        def check(self, ctx):
+            seen.append(ctx.worktree_heads)
+            return None
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [Capture()], clock=lambda: 0.0,
+               enrich=lambda cwd: GitInfo(True, "sha", "main", True, heads))
+    d.tick()
+    assert seen == [heads]
+
 
 def test_asserts_working_when_pending():
     client = FakeClient([_agent(status="idle")])

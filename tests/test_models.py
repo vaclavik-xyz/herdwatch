@@ -1,4 +1,4 @@
-from herdwatch.models import Pending, PaneContext
+from herdwatch.models import Pending, PaneContext, WorktreeHead
 
 
 def test_pending_fields():
@@ -10,3 +10,19 @@ def test_pane_context_fields():
     c = PaneContext(pane_id="w1:p1", agent="claude", cwd="/x", status="idle",
                     head_sha="abc", branch="main", is_git_repo=True, has_github_remote=True)
     assert c.pane_id == "w1:p1" and c.is_git_repo is True
+
+
+def test_pane_context_worktree_heads_default_empty():
+    c = PaneContext(pane_id="w1:p1", agent="claude", cwd="/x", status="idle",
+                    head_sha="abc", branch="main", is_git_repo=True, has_github_remote=True)
+    assert c.worktree_heads == ()
+
+
+def test_pane_context_carries_worktree_heads():
+    heads = (WorktreeHead(head_sha="abc", branch="main"),
+             WorktreeHead(head_sha="def", branch="feat/x"))
+    c = PaneContext(pane_id="w1:p1", agent="claude", cwd="/x", status="idle",
+                    head_sha="abc", branch="main", is_git_repo=True, has_github_remote=True,
+                    worktree_heads=heads)
+    assert c.worktree_heads == heads
+    assert c.worktree_heads[1].branch == "feat/x"

@@ -4,6 +4,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
+from .models import WorktreeHead
+
 
 @dataclass(frozen=True)
 class GitInfo:
@@ -11,6 +13,7 @@ class GitInfo:
     head_sha: str | None
     branch: str | None
     has_github_remote: bool
+    worktree_heads: tuple[WorktreeHead, ...] = ()
 
 
 def _run_git(args: list[str], cwd: str) -> tuple[int, str]:
@@ -22,6 +25,21 @@ def _run_git(args: list[str], cwd: str) -> tuple[int, str]:
         return 1, ""
 
 
+def _parse_worktrees(porcelain: str) -> tuple[WorktreeHead, ...]:
+    heads = []
+    sha, branch = None, None
+    for line in porcelain.splitlines() + [""]:
+        if not line:  # blank line ends a worktree block
+            if sha:
+                heads.append(WorktreeHead(head_sha=sha, branch=branch))
+            sha, branch = None, None
+        elif line.startswith("HEAD "):
+            sha = line[len("HEAD "):]
+        elif line.startswith("branch refs/heads/"):
+            branch = line[len("branch refs/heads/"):]
+    return tuple(heads)
+
+
 def enrich(cwd: str, run: Callable[[list[str], str], tuple[int, str]] = _run_git) -> GitInfo:
     rc, _ = run(["rev-parse", "--is-inside-work-tree"], cwd)
     if rc != 0:
@@ -29,9 +47,11 @@ def enrich(cwd: str, run: Callable[[list[str], str], tuple[int, str]] = _run_git
     _, head = run(["rev-parse", "HEAD"], cwd)
     _, branch = run(["branch", "--show-current"], cwd)
     _, remote = run(["remote", "get-url", "origin"], cwd)
+    _, worktrees = run(["worktree", "list", "--porcelain"], cwd)
     return GitInfo(
         is_git_repo=True,
         head_sha=head or None,
         branch=branch or None,
         has_github_remote="github.com" in remote,
+        worktree_heads=_parse_worktrees(worktrees),
     )

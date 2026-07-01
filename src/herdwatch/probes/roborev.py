@@ -65,9 +65,11 @@ class RoborevProbe:
                                   lambda: self._run_list(ctx.cwd))
         if not isinstance(jobs, list):
             return None
+        # a review may target a commit made in a linked worktree, not cwd's HEAD
+        shas = {h.head_sha for h in ctx.worktree_heads} or {ctx.head_sha}
         for job in jobs:
             if not isinstance(job, dict):
                 continue
-            if job.get("git_ref") == ctx.head_sha and job.get("status") in _ACTIVE:
+            if job.get("git_ref") in shas and job.get("status") in _ACTIVE:
                 return Pending(label="review", priority=PRIORITY, source=self.name)
         return None

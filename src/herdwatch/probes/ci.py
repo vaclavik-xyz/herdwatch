@@ -5,7 +5,7 @@ import subprocess
 from typing import Callable
 
 from ..cache import TTLCache
-from ..models import PaneContext, Pending
+from ..models import PaneContext, Pending, WorktreeHead
 
 PRIORITY = 20
 _ACTIVE = {"queued", "in_progress"}
@@ -36,14 +36,20 @@ class CIProbe:
     def check(self, ctx: PaneContext) -> Pending | None:
         if not (ctx.is_git_repo and ctx.has_github_remote and ctx.head_sha):
             return None
-        runs = self._cache.get_or(("ci", ctx.cwd, ctx.head_sha),
-                                  lambda: self._run_gh(ctx.cwd, ctx.branch))
-        if not isinstance(runs, list):
-            return None
-        for run in runs:
-            if not isinstance(run, dict):
+        # check every checkout of the repo, not just cwd's: the agent's work
+        # (and its PR CI) often lives on a branch in a linked worktree while
+        # the pane cwd stays on the main checkout
+        heads = ctx.worktree_heads or (WorktreeHead(ctx.head_sha, ctx.branch),)
+        for head in heads:
+            runs = self._cache.get_or(
+                ("ci", ctx.cwd, head.head_sha),
+                lambda br=head.branch: self._run_gh(ctx.cwd, br))
+            if not isinstance(runs, list):
                 continue
-            if run.get("headSha") == ctx.head_sha and run.get("status") in _ACTIVE:
-                wf = run.get("workflowName") or "ci"
-                return Pending(label=f"CI: {wf}", priority=PRIORITY, source=self.name)
+            for run in runs:
+                if not isinstance(run, dict):
+                    continue
+                if run.get("headSha") == head.head_sha and run.get("status") in _ACTIVE:
+                    wf = run.get("workflowName") or "ci"
+                    return Pending(label=f"CI: {wf}", priority=PRIORITY, source=self.name)
         return None

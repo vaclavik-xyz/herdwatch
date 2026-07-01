@@ -110,6 +110,7 @@ class Daemon:
             branch=gi.branch,
             is_git_repo=gi.is_git_repo,
             has_github_remote=gi.has_github_remote,
+            worktree_heads=gi.worktree_heads,
         )
 
     def tick(self) -> None:
