@@ -37,13 +37,15 @@ class HerdrClient:
         return (data.get("result") or {}).get("process_info", {})
 
     def report_agent(self, pane_id: str, source: str, agent: str, state: str,
-                     custom_status: str | None = None) -> None:
+                     custom_status: str | None = None) -> bool:
         args = [self._bin, "pane", "report-agent", pane_id, "--source", source,
                 "--agent", agent, "--state", state]
         if custom_status:
             args += ["--custom-status", custom_status]
-        self._run(args)
+        rc, _ = self._run(args)
+        return rc == 0
 
-    def release_agent(self, pane_id: str, source: str, agent: str) -> None:
-        self._run([self._bin, "pane", "release-agent", pane_id,
-                   "--source", source, "--agent", agent])
+    def release_agent(self, pane_id: str, source: str, agent: str) -> bool:
+        rc, _ = self._run([self._bin, "pane", "release-agent", pane_id,
+                           "--source", source, "--agent", agent])
+        return rc == 0

@@ -61,6 +61,20 @@ class Daemon:
         except Exception:
             log.warning("snapshot publish failed; continuing", exc_info=True)
 
+    def _release(self, pane_id: str, reason: str) -> bool:
+        """Release our assertion and drop bookkeeping only if herdr confirmed it,
+        so a failed release (herdr down/restarting) is retried instead of
+        orphaning a `working ⏳` session. Returns whether the pane is now clear."""
+        mp = self.managed.get(pane_id)
+        if mp is None:
+            return True
+        if self._client.release_agent(pane_id, SOURCE, mp.agent):
+            del self.managed[pane_id]
+            log.info("release %s (%s)", pane_id, reason)
+            return True
+        log.warning("release of %s failed (%s); keeping to retry", pane_id, reason)
+        return False
+
     def _eligible(self, pane_id: str) -> bool:
         if self._deny and pane_id in self._deny:
             return False
@@ -115,16 +129,25 @@ class Daemon:
             label = aggregate(pendings)
             if label:
                 agent_name = ctx.agent
-                if not managed or self.managed[pane_id].custom_status != label:
-                    self._client.report_agent(pane_id, SOURCE, agent_name, "working", label)
-                self.managed[pane_id] = ManagedPane(label, agent_name)
+                if managed and self.managed[pane_id].custom_status == label:
+                    pass  # already asserting this exact label; nothing to do
+                elif self._client.report_agent(pane_id, SOURCE, agent_name, "working", label):
+                    self.managed[pane_id] = ManagedPane(label, agent_name)
+                    log.info("hold %s -> %s (%s)", pane_id, label, agent_name)
+                else:
+                    # report failed (herdr down): don't record, and don't let the
+                    # throttle defer the retry to the next reprobe interval
+                    self._last_probe.pop(pane_id, None)
             elif managed:
-                self._client.release_agent(pane_id, SOURCE, self.managed[pane_id].agent)
-                del self.managed[pane_id]
-        # drop bookkeeping for panes that vanished from the list
+                if not self._release(pane_id, "work cleared"):
+                    self._last_probe.pop(pane_id, None)  # failed release -> retry promptly
+        # a managed pane that vanished from agent_list: release our assertion so
+        # we never orphan a `working ⏳` session in herdr (agent exited, pane
+        # closed, or herdr restarted/blipped). Keep bookkeeping on failure so the
+        # release is retried next tick instead of leaking the assertion.
         for pane_id in list(self.managed):
             if pane_id not in seen:
-                del self.managed[pane_id]
+                self._release(pane_id, "vanished from agent list")
         for pane_id in list(self._last_probe):
             if pane_id not in seen:
                 self._last_probe.pop(pane_id, None)

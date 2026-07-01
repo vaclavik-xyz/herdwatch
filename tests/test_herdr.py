@@ -20,6 +20,14 @@ def test_release_agent_builds_command():
     client.release_agent("w1:p1", "herdwatch", "claude")
     assert calls[0] == ["herdr", "pane", "release-agent", "w1:p1", "--source", "herdwatch", "--agent", "claude"]
 
+def test_report_agent_returns_success_flag():
+    assert HerdrClient(run=lambda a: (0, "")).report_agent("w1:p1", "s", "claude", "working") is True
+    assert HerdrClient(run=lambda a: (1, "boom")).report_agent("w1:p1", "s", "claude", "working") is False
+
+def test_release_agent_returns_success_flag():
+    assert HerdrClient(run=lambda a: (0, "")).release_agent("w1:p1", "s", "claude") is True
+    assert HerdrClient(run=lambda a: (1, "boom")).release_agent("w1:p1", "s", "claude") is False
+
 def test_agent_list_empty_on_error():
     assert HerdrClient(run=lambda args: (1, "")).agent_list() == []
 
