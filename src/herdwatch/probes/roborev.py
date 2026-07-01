@@ -53,6 +53,8 @@ class RoborevProbe:
         jobs = self._cache.get_or(("roborev-list", ctx.cwd),
                                   lambda: self._run_list(ctx.cwd))
         for job in jobs:
+            if not isinstance(job, dict):
+                continue
             if job.get("git_ref") == ctx.head_sha and job.get("status") in _ACTIVE:
                 return Pending(label="review", priority=PRIORITY, source=self.name)
         return None

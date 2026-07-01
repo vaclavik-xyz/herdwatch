@@ -35,3 +35,9 @@ def test_none_when_job_done():
     probe = RoborevProbe(_cache(), run_status=lambda: _BUSY,
                          run_list=lambda cwd: [{"git_ref": "abc", "status": "done"}])
     assert probe.check(_ctx()) is None
+
+
+def test_non_dict_job_is_skipped():
+    probe = RoborevProbe(_cache(), run_status=lambda: _BUSY,
+                         run_list=lambda cwd: ["garbage", {"git_ref": "abc", "status": "running"}])
+    assert probe.check(_ctx()) is not None

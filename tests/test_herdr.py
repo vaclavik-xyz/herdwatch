@@ -22,3 +22,13 @@ def test_release_agent_builds_command():
 
 def test_agent_list_empty_on_error():
     assert HerdrClient(run=lambda args: (1, "")).agent_list() == []
+
+def test_agent_list_handles_result_null():
+    import json
+    payload = json.dumps({"result": None})
+    assert HerdrClient(run=lambda a: (0, payload)).agent_list() == []
+
+def test_pane_process_info_handles_result_null():
+    import json
+    payload = json.dumps({"result": None})
+    assert HerdrClient(run=lambda a: (0, payload)).pane_process_info("w1:p1") == {}

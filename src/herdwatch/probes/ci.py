@@ -39,6 +39,8 @@ class CIProbe:
         runs = self._cache.get_or(("ci", ctx.cwd, ctx.head_sha),
                                   lambda: self._run_gh(ctx.cwd, ctx.branch))
         for run in runs:
+            if not isinstance(run, dict):
+                continue
             if run.get("headSha") == ctx.head_sha and run.get("status") in _ACTIVE:
                 wf = run.get("workflowName") or "ci"
                 return Pending(label=f"CI: {wf}", priority=PRIORITY, source=self.name)

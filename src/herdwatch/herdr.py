@@ -30,11 +30,11 @@ class HerdrClient:
 
     def agent_list(self) -> list[dict]:
         data = self._json([self._bin, "agent", "list"])
-        return data.get("result", {}).get("agents", [])
+        return (data.get("result") or {}).get("agents", [])
 
     def pane_process_info(self, pane_id: str) -> dict:
         data = self._json([self._bin, "pane", "process-info", "--pane", pane_id])
-        return data.get("result", {}).get("process_info", {})
+        return (data.get("result") or {}).get("process_info", {})
 
     def report_agent(self, pane_id: str, source: str, agent: str, state: str,
                      custom_status: str | None = None) -> None:

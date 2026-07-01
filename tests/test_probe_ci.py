@@ -27,3 +27,8 @@ def test_none_when_only_completed():
 def test_none_when_run_is_for_other_sha():
     probe = CIProbe(_cache(), run_gh=lambda cwd, br: [{"headSha": "zzz", "status": "queued", "workflowName": "ci"}])
     assert probe.check(_ctx()) is None
+
+def test_non_dict_run_is_skipped():
+    probe = CIProbe(_cache(), run_gh=lambda cwd, br: ["garbage", {"headSha": "abc", "status": "in_progress", "workflowName": "ci"}])
+    p = probe.check(_ctx())
+    assert p is not None and p.label == "CI: ci"
