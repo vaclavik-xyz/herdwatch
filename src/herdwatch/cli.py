@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 
@@ -21,6 +22,10 @@ def _state_store() -> _state.StateStore:
 
 
 def _cmd_daemon(args) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
     cfg = load_config(args.config)
     daemon = build_daemon(cfg)
     daemon.run(cfg.poll_interval_s)
