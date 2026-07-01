@@ -19,9 +19,11 @@ _IDLE = {"daemon": {"queued_jobs": 0, "running_jobs": 0}}
 
 
 def test_gate_skips_when_queue_empty():
+    calls = []
     probe = RoborevProbe(_cache(), run_status=lambda: _IDLE,
-                         run_list=lambda cwd: [{"git_ref": "abc", "status": "running"}])
+                         run_list=lambda cwd: calls.append(cwd) or [{"git_ref": "abc", "status": "running"}])
     assert probe.check(_ctx()) is None
+    assert calls == []
 
 
 def test_pending_when_job_running_for_head():
@@ -41,3 +43,24 @@ def test_non_dict_job_is_skipped():
     probe = RoborevProbe(_cache(), run_status=lambda: _BUSY,
                          run_list=lambda cwd: ["garbage", {"git_ref": "abc", "status": "running"}])
     assert probe.check(_ctx()) is not None
+
+
+def test_malformed_top_level_status_returns_none():
+    probe = RoborevProbe(_cache(), run_status=lambda: [],
+                         run_list=lambda cwd: [{"git_ref": "abc", "status": "running"}])
+    assert probe.check(_ctx()) is None
+
+
+def test_malformed_top_level_job_list_returns_none():
+    probe = RoborevProbe(_cache(), run_status=lambda: _BUSY,
+                         run_list=lambda cwd: 1)
+    assert probe.check(_ctx()) is None
+
+
+def test_malformed_daemon_job_counts_return_none():
+    calls = []
+    status = {"daemon": {"queued_jobs": None, "running_jobs": "1"}}
+    probe = RoborevProbe(_cache(), run_status=lambda: status,
+                         run_list=lambda cwd: calls.append(cwd) or [{"git_ref": "abc", "status": "running"}])
+    assert probe.check(_ctx()) is None
+    assert calls == []

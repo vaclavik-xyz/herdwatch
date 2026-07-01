@@ -38,6 +38,8 @@ class CIProbe:
             return None
         runs = self._cache.get_or(("ci", ctx.cwd, ctx.head_sha),
                                   lambda: self._run_gh(ctx.cwd, ctx.branch))
+        if not isinstance(runs, list):
+            return None
         for run in runs:
             if not isinstance(run, dict):
                 continue

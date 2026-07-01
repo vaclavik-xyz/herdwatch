@@ -37,3 +37,15 @@ def test_bgjobs_subtable_sets_min_age_and_keeps_enabled(tmp_path):
     cfg = load(str(p))
     assert cfg.bgjobs_min_age_s == 20
     assert cfg.probes["bgjobs"] is True
+
+
+def test_panes_allow_deny_and_reprobe_interval_are_loaded(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(
+        '[daemon]\nreprobe_interval_s = 7\n'
+        '[panes]\nallow = ["w1:p1"]\ndeny = ["w2:p2"]\n'
+    )
+    cfg = load(str(p))
+    assert cfg.reprobe_interval_s == 7
+    assert cfg.allow == ["w1:p1"]
+    assert cfg.deny == ["w2:p2"]

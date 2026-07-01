@@ -9,6 +9,35 @@ def test_add_and_list_marker(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "deploy" in out and "w1:p1" in out
 
+def test_add_forwards_marker_lifecycle_options(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeMarker:
+        id = "m1"
+
+    class FakeStore:
+        def add(self, pane, label, **kwargs):
+            captured["pane"] = pane
+            captured["label"] = label
+            captured.update(kwargs)
+            return FakeMarker()
+
+    monkeypatch.setattr(cli, "_store", lambda: FakeStore())
+    assert cli.main([
+        "add", "deploy",
+        "--pane", "w2:p2",
+        "--until", "make deploy",
+        "--pid", "123",
+        "--ttl", "30",
+    ]) == 0
+    assert captured == {
+        "pane": "w2:p2",
+        "label": "deploy",
+        "until": "make deploy",
+        "pid": 123,
+        "ttl_s": 30,
+    }
+
 def test_add_requires_pane(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path))
     monkeypatch.delenv("HERDR_PANE_ID", raising=False)

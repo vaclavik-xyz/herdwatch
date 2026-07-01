@@ -36,7 +36,7 @@ def test_install_reports_launchctl_load_failure():
         render=lambda: "PLIST",
         write=lambda p, c: None,
     )
-    assert rc == 1 and "failed" in msg
+    assert rc == 1 and "failed" in msg and "boom" in msg
 
 
 def test_install_uses_injected_module_internals_not_real_system(monkeypatch):
@@ -71,3 +71,13 @@ def test_is_macos_matches_platform():
 def test_default_path_env_includes_local_bin():
     path = service.default_path_env()
     assert "/opt/homebrew/bin" in path
+
+
+def test_run_returns_stderr_when_stdout_is_empty():
+    rc, output = service._run([
+        sys.executable,
+        "-c",
+        "import sys; sys.stderr.write('boom'); raise SystemExit(3)",
+    ])
+    assert rc == 3
+    assert output == "boom"

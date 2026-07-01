@@ -88,7 +88,7 @@ def _write(path: str, content: str) -> None:
 def _run(args: list[str]) -> tuple[int, str]:
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=10)
-        return r.returncode, r.stdout
+        return r.returncode, (r.stdout + r.stderr)
     except Exception:
         return 1, ""
 
@@ -111,9 +111,10 @@ def install(*, plist_path: str = PLIST_PATH,
     write = write or _write
     write(plist_path, render())
     run(["launchctl", "unload", plist_path])  # tolerate not-yet-loaded
-    rc, _ = run(["launchctl", "load", plist_path])
+    rc, output = run(["launchctl", "load", plist_path])
     if rc != 0:
-        return 1, f"wrote {plist_path} but `launchctl load` failed (rc={rc}); check `herdwatch doctor`"
+        detail = f": {output}" if output else ""
+        return 1, f"wrote {plist_path} but `launchctl load` failed (rc={rc}){detail}; check `herdwatch doctor`"
     return 0, f"installed and loaded {plist_path}"
 
 

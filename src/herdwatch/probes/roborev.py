@@ -11,6 +11,12 @@ PRIORITY = 30
 _ACTIVE = {"queued", "running"}
 
 
+def _job_count(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return 0
+
+
 def default_run_status() -> dict:
     try:
         r = subprocess.run(["roborev", "status", "--json"], capture_output=True,
@@ -47,11 +53,18 @@ class RoborevProbe:
         if not (ctx.is_git_repo and ctx.head_sha):
             return None
         status = self._cache.get_or(("roborev-status",), self._run_status)
+        if not isinstance(status, dict):
+            return None
         daemon = status.get("daemon", {})
-        if (daemon.get("queued_jobs", 0) + daemon.get("running_jobs", 0)) == 0:
+        if not isinstance(daemon, dict):
+            return None
+        active_jobs = _job_count(daemon.get("queued_jobs", 0)) + _job_count(daemon.get("running_jobs", 0))
+        if active_jobs == 0:
             return None
         jobs = self._cache.get_or(("roborev-list", ctx.cwd),
                                   lambda: self._run_list(ctx.cwd))
+        if not isinstance(jobs, list):
+            return None
         for job in jobs:
             if not isinstance(job, dict):
                 continue
