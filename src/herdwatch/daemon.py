@@ -20,6 +20,7 @@ from .probes.bgjobs import BgJobsProbe
 from .probes.ci import CIProbe
 from .probes.marker import MarkerProbe
 from .probes.roborev import RoborevProbe
+from .state import StateStore
 
 SOURCE = "herdwatch"
 MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
@@ -37,7 +38,8 @@ class Daemon:
                  clock: Callable[[], float] = time.time,
                  enrich: Callable[[str], gitctx.GitInfo] = gitctx.enrich,
                  allow: list[str] | None = None,
-                 deny: list[str] | None = None) -> None:
+                 deny: list[str] | None = None,
+                 on_snapshot: Callable[[list[dict]], None] = lambda rows: None) -> None:
         self._client = client
         self._probes = probes
         self._reprobe = reprobe_interval_s
@@ -45,8 +47,19 @@ class Daemon:
         self._enrich = enrich
         self._allow = set(allow or [])
         self._deny = set(deny or [])
+        self._on_snapshot = on_snapshot
         self.managed: dict[str, ManagedPane] = {}
         self._last_probe: dict[str, float] = {}
+
+    def _rows(self) -> list[dict]:
+        return [{"pane_id": pid, "agent": mp.agent, "status": mp.custom_status}
+                for pid, mp in sorted(self.managed.items())]
+
+    def _publish(self) -> None:
+        try:
+            self._on_snapshot(self._rows())
+        except Exception:
+            log.warning("snapshot publish failed; continuing", exc_info=True)
 
     def _eligible(self, pane_id: str) -> bool:
         if self._deny and pane_id in self._deny:
@@ -115,6 +128,7 @@ class Daemon:
         for pane_id in list(self._last_probe):
             if pane_id not in seen:
                 self._last_probe.pop(pane_id, None)
+        self._publish()
 
     def release_all(self) -> None:
         """Release every pane herdwatch currently asserts (clean shutdown)."""
@@ -124,6 +138,7 @@ class Daemon:
             except Exception:
                 log.warning("failed to release %s on shutdown", pane_id, exc_info=True)
         self.managed.clear()
+        self._publish()
 
     def run(self, poll_interval_s: float, sleep: Callable[[float], None] = time.sleep) -> None:
         atexit.register(self.release_all)
@@ -158,4 +173,5 @@ def build_daemon(config: Config, client=None) -> Daemon:
         probes.append(BgJobsProbe(process_info=client.pane_process_info,
                                   min_age_s=config.bgjobs_min_age_s))
     return Daemon(client, probes, reprobe_interval_s=config.reprobe_interval_s,
-                  allow=config.allow, deny=config.deny)
+                  allow=config.allow, deny=config.deny,
+                  on_snapshot=StateStore().write)
