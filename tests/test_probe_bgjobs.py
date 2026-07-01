@@ -47,6 +47,22 @@ def test_ignores_codex_node_repl_helper():
     assert probe.check(_ctx()) is None
 
 
+def test_extra_ignore_adds_to_defaults():
+    # user-supplied names are ignored on top of the built-in defaults
+    desc = [{"pid": 505, "pgid": 505, "etime_s": 60, "comm": "vite"}]
+    probe = BgJobsProbe(process_info=lambda pid: _INFO, list_descendants=lambda root: desc,
+                        extra_ignore=["vite"])
+    assert probe.check(_ctx()) is None
+
+
+def test_extra_ignore_does_not_drop_builtin_defaults():
+    # adding an extra name must not lose the built-in ignore set
+    desc = [{"pid": 606, "pgid": 606, "etime_s": 60, "comm": "node_repl"}]
+    probe = BgJobsProbe(process_info=lambda pid: _INFO, list_descendants=lambda root: desc,
+                        extra_ignore=["vite"])
+    assert probe.check(_ctx()) is None
+
+
 def test_raising_process_info_degrades_to_none():
     def boom(pid):
         raise RuntimeError("herdr unavailable")

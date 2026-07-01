@@ -69,7 +69,34 @@ actions are registered too.
 ## Config
 
 `~/.config/herdwatch/config.toml` — enable/disable probes, intervals, per-pane
-`allow`/`deny`. See `docs/superpowers/specs/2026-07-01-herdwatch-design.md`.
+`allow`/`deny`, and per-probe tuning. Everything has a sensible default; the
+file is optional. See `docs/superpowers/specs/2026-07-01-herdwatch-design.md`.
+
+```toml
+[daemon]
+poll_interval_s = 4         # how often to re-check herdr
+reprobe_interval_s = 15     # min seconds between probing the same pane
+
+[probes]
+ci = true                   # toggle any probe on/off (roborev, ci, bgjobs, marker)
+roborev = true
+
+# Per-probe tuning goes in its own table. Don't ALSO list the probe as a
+# boolean above — TOML rejects a key that is both a value and a table.
+[probes.bgjobs]
+min_age_s = 5               # ignore just-spawned processes
+ignore = ["vite", "webpack"]  # extra process names to treat as "not a job"
+                              # (added on top of the built-in defaults)
+
+[panes]
+allow = []                  # if non-empty, only manage these pane ids
+deny  = []                  # never manage these pane ids
+```
+
+The `[probes.bgjobs] ignore` list is how you teach the background-job probe
+about long-lived helper processes it should not wait on (an agent's own
+runtime, an editor daemon, etc.) — no code change needed, just restart the
+daemon.
 
 ## v1 limitations
 

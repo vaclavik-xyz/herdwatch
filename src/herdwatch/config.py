@@ -17,6 +17,7 @@ class Config:
     probes: dict[str, bool] = field(default_factory=lambda: dict(_DEFAULT_PROBES))
     ci_cache_ttl_s: float = 10.0
     bgjobs_min_age_s: float = 5.0
+    bgjobs_ignore: list[str] = field(default_factory=list)
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
 
@@ -42,6 +43,7 @@ def load(path: str | None = None) -> Config:
     bg = probes_data.get("bgjobs")
     if isinstance(bg, dict):
         cfg.bgjobs_min_age_s = float(bg.get("min_age_s", cfg.bgjobs_min_age_s))
+        cfg.bgjobs_ignore = list(bg.get("ignore", cfg.bgjobs_ignore))
     panes = data.get("panes", {})
     cfg.allow = list(panes.get("allow", []))
     cfg.deny = list(panes.get("deny", []))
