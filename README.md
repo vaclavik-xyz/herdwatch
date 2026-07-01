@@ -40,7 +40,9 @@ recorded `⏳` label per pane) to a small JSON state file
 (`~/.local/state/herdwatch/managed.json`), so `herdwatch status` — a separate
 process — can show what herdwatch is holding right now. The snapshot records the
 daemon's pid, so `status` can tell a live snapshot from one a dead daemon left
-behind.
+behind. On startup the daemon reads that file back and re-adopts those panes, so
+a crash-and-restart reconciles them (next tick re-probes → re-asserts or
+releases) instead of orphaning a `working ⏳`.
 
 ## Install & run
 
@@ -130,12 +132,12 @@ names to skip.
   `poll_interval_s`. If the daemon died uncleanly the file lingers, but `status`
   flags this by checking the recorded pid. (`socket_path` in config is reserved
   for a future live status channel and is currently unused.)
-- **No cross-restart reconciliation.** On clean shutdown (SIGTERM / launchctl
-  unload) herdwatch releases all panes it manages and clears its state file. But
-  if the daemon is killed uncleanly *and* the background work finishes while
-  it's down, a pane can be left showing `working ⏳` until it next becomes
-  busy-then-idle. A future version will reconcile herdwatch-owned assertions on
-  startup.
+- **Recovery depends on the state file.** On clean shutdown (SIGTERM / launchctl
+  unload) herdwatch releases every pane it manages. After an *unclean* death it
+  reconciles on restart by re-adopting the panes from
+  `~/.local/state/herdwatch/managed.json` — but if that file is deleted while the
+  daemon is down, any pane held at crash time is left showing `working ⏳` until
+  it next becomes busy-then-idle.
 - **No "step aside" on resumed work.** While herdwatch asserts `working`, its
   own assertion masks the agent's real status, so it cannot detect the human
   resuming genuine work mid-wait; the ⏳ label persists until the background

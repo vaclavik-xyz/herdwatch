@@ -50,6 +50,41 @@ def test_status_lists_markers_and_panes(tmp_path, monkeypatch, capsys):
     assert "deploy" in out and "w9:p9" in out  # marker
 
 
+def test_daemon_recovers_only_from_dead_snapshot(monkeypatch):
+    import os
+    from herdwatch.config import Config
+    from herdwatch.state import ManagedSnapshot
+
+    rows = [{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ x"}]
+
+    class FakeDaemon:
+        def __init__(self):
+            self.adopted = None
+        def adopt(self, r):
+            self.adopted = r
+        def run(self, interval):
+            pass
+
+    fake = FakeDaemon()
+    monkeypatch.setattr(cli, "load_config", lambda p: Config())
+    monkeypatch.setattr(cli, "build_daemon", lambda cfg: fake)
+
+    def store_with_pid(pid):
+        class S:
+            def read(self):
+                return ManagedSnapshot(pid=pid, updated_at=0.0, panes=rows)
+        return S()
+
+    monkeypatch.setattr(cli, "_state_store", lambda: store_with_pid(2_000_000_000))
+    assert cli.main(["daemon"]) == 0
+    assert fake.adopted == rows  # dead pid -> recovered
+
+    fake.adopted = None
+    monkeypatch.setattr(cli, "_state_store", lambda: store_with_pid(os.getpid()))
+    assert cli.main(["daemon"]) == 0
+    assert fake.adopted is None  # live daemon owns it -> not touched
+
+
 def test_add_and_list_marker(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path))
     monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")

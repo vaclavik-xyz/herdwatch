@@ -50,10 +50,25 @@ class Daemon:
         self._on_snapshot = on_snapshot
         self.managed: dict[str, ManagedPane] = {}
         self._last_probe: dict[str, float] = {}
+        # panes recovered from a prior run: force one re-assert to herdr on the
+        # first probe, since herdr may have lost the old assertion while we were down
+        self._adopted: set[str] = set()
 
     def _rows(self) -> list[dict]:
         return [{"pane_id": pid, "agent": mp.agent, "status": mp.custom_status}
                 for pid, mp in sorted(self.managed.items())]
+
+    def adopt(self, rows: list[dict]) -> None:
+        """Recover the managed set from a prior run's state snapshot so a restart
+        reconciles the panes we were holding: the next tick re-probes each and
+        either re-asserts or releases it, instead of leaving an orphaned
+        `working ⏳` assertion behind after an unclean shutdown."""
+        for row in rows:
+            pane_id = row.get("pane_id")
+            if pane_id:
+                self.managed[pane_id] = ManagedPane(row.get("status", ""),
+                                                    row.get("agent", "agent"))
+                self._adopted.add(pane_id)
 
     def _publish(self) -> None:
         try:
@@ -70,6 +85,7 @@ class Daemon:
             return True
         if self._client.release_agent(pane_id, SOURCE, mp.agent):
             del self.managed[pane_id]
+            self._adopted.discard(pane_id)
             log.info("release %s (%s)", pane_id, reason)
             return True
         log.warning("release of %s failed (%s); keeping to retry", pane_id, reason)
@@ -129,10 +145,12 @@ class Daemon:
             label = aggregate(pendings)
             if label:
                 agent_name = ctx.agent
-                if managed and self.managed[pane_id].custom_status == label:
+                if (managed and self.managed[pane_id].custom_status == label
+                        and pane_id not in self._adopted):
                     pass  # already asserting this exact label; nothing to do
                 elif self._client.report_agent(pane_id, SOURCE, agent_name, "working", label):
                     self.managed[pane_id] = ManagedPane(label, agent_name)
+                    self._adopted.discard(pane_id)
                     log.info("hold %s -> %s (%s)", pane_id, label, agent_name)
                 else:
                     # report failed (herdr down): don't record, and don't let the

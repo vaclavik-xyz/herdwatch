@@ -28,6 +28,11 @@ def _cmd_daemon(args) -> int:
     )
     cfg = load_config(args.config)
     daemon = build_daemon(cfg)
+    # recover holds from a prior run (crash/restart) -- but only if that daemon
+    # is dead, so a second instance never steals a live daemon's panes
+    snap = _state_store().read()
+    if snap and snap.panes and not _state.pid_alive(snap.pid):
+        daemon.adopt(snap.panes)
     daemon.run(cfg.poll_interval_s)
     return 0
 
