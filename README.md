@@ -19,6 +19,13 @@ set of probes. While any probe is pending it asserts `working` + a `⏳` label v
 `herdr pane report-agent`; when they clear it releases the pane. No changes to
 herdr, no per-agent setup, and it works for any agent herdr tracks.
 
+The daemon also publishes the set of panes it is currently holding (and the
+recorded `⏳` label per pane) to a small JSON state file
+(`~/.local/state/herdwatch/managed.json`), so `herdwatch status` — a separate
+process — can show what herdwatch is holding right now. The snapshot records the
+daemon's pid, so `status` can tell a live snapshot from one a dead daemon left
+behind.
+
 ## Install & run
 
 **From source (recommended for now):**
@@ -56,7 +63,7 @@ actions are registered too.
     herdwatch add "deploy" --until 'gh run watch --exit-status'
     herdwatch add "backup" --ttl 600
     herdwatch list
-    herdwatch status         # list active markers
+    herdwatch status         # what the daemon holds right now + active markers
     herdwatch rm <id>
 
 ## Config
@@ -69,15 +76,17 @@ actions are registered too.
 - **Poll-based, not event-driven.** The daemon polls `herdr agent list` every
   `poll_interval_s` (~4s). A pane can briefly show its own "done" before
   herdwatch re-marks it working (a sub-poll-interval window).
-- **`status` shows markers only.** The daemon runs as a separate process, so
-  `herdwatch status` cannot show its in-memory managed-pane set — only active
-  markers. (`socket_path` in config is reserved for a future status channel and
-  is currently unused.)
+- **`status` is a snapshot, not a live query.** `herdwatch status` reads the
+  state file the daemon writes each tick, so it lags reality by up to one
+  `poll_interval_s`. If the daemon died uncleanly the file lingers, but `status`
+  flags this by checking the recorded pid. (`socket_path` in config is reserved
+  for a future live status channel and is currently unused.)
 - **No cross-restart reconciliation.** On clean shutdown (SIGTERM / launchctl
-  unload) herdwatch releases all panes it manages. But if the daemon is killed
-  uncleanly *and* the background work finishes while it's down, a pane can be
-  left showing `working ⏳` until it next becomes busy-then-idle. A future
-  version will reconcile herdwatch-owned assertions on startup.
+  unload) herdwatch releases all panes it manages and clears its state file. But
+  if the daemon is killed uncleanly *and* the background work finishes while
+  it's down, a pane can be left showing `working ⏳` until it next becomes
+  busy-then-idle. A future version will reconcile herdwatch-owned assertions on
+  startup.
 - **No "step aside" on resumed work.** While herdwatch asserts `working`, its
   own assertion masks the agent's real status, so it cannot detect the human
   resuming genuine work mid-wait; the ⏳ label persists until the background

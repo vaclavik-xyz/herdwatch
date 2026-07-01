@@ -6,6 +6,7 @@ import sys
 
 from . import doctor as _doctor
 from . import service as _service
+from . import state as _state
 from .config import load as load_config
 from .daemon import MARKER_DIR, build_daemon
 from .markers import MarkerStore
@@ -13,6 +14,10 @@ from .markers import MarkerStore
 
 def _store() -> MarkerStore:
     return MarkerStore(MARKER_DIR)
+
+
+def _state_store() -> _state.StateStore:
+    return _state.StateStore(_state.STATE_PATH)
 
 
 def _cmd_daemon(args) -> int:
@@ -52,6 +57,18 @@ def _cmd_rm(args) -> int:
 
 
 def _cmd_status(args) -> int:
+    snap = _state_store().read()
+    if snap is None:
+        print("daemon: no state yet (daemon not started, or state dir unwritable)")
+    else:
+        if not _state.pid_alive(snap.pid):
+            print(f"daemon: not running (snapshot pid {snap.pid} is gone); held "
+                  "panes below may be stale — check `herdwatch doctor`")
+        if snap.panes:
+            for p in snap.panes:
+                print(f"holding {p['pane_id']}  {p['status']}  ({p['agent']})")
+        else:
+            print("holding no panes")
     for m in _store().all():
         print(f"marker {m.id} {m.pane_id} {m.label}")
     return 0
