@@ -35,3 +35,27 @@ def test_active_for_pane_prunes(tmp_path):
     now[0] = 1010.0
     assert s.active_for_pane("w1:p1") == []
     assert s.all() == []  # pruned from disk
+
+def test_dead_pid_not_pending(tmp_path):
+    s = _store(tmp_path, pid_alive=lambda p: False)
+    m = s.add("w1:p1", "x", pid=123)
+    assert s.is_pending(m) is False
+
+def test_live_pid_still_pending(tmp_path):
+    s = _store(tmp_path, pid_alive=lambda p: True)
+    m = s.add("w1:p1", "x", pid=123)
+    assert s.is_pending(m) is True
+
+def test_active_for_pane_leaves_other_pane(tmp_path):
+    s = _store(tmp_path)
+    s.add("w1:p1", "keep")
+    s.add("w2:p2", "other")
+    assert len(s.active_for_pane("w1:p1")) == 1
+    assert any(m.pane_id == "w2:p2" for m in s.all())
+
+def test_corrupt_marker_file_is_skipped(tmp_path):
+    s = _store(tmp_path)
+    s.add("w1:p1", "good")
+    (tmp_path / "bad.json").write_text("{not valid json")
+    labels = [m.label for m in s.all()]
+    assert "good" in labels
