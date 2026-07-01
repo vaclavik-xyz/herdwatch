@@ -1,5 +1,54 @@
+import os
+
 from herdwatch import cli
+from herdwatch import state as _state
 from herdwatch.markers import MarkerStore
+
+
+def _seed_snapshot(tmp_path, monkeypatch, panes, getpid=os.getpid):
+    p = str(tmp_path / "managed.json")
+    monkeypatch.setattr(_state, "STATE_PATH", p)
+    _state.StateStore(p, getpid=getpid).write(panes)
+
+
+def test_status_reports_held_panes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path / "markers"))
+    _seed_snapshot(tmp_path, monkeypatch,
+                   [{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "w1:p1" in out and "⏳ review" in out
+    assert "not running" not in out  # our own pid is alive
+
+
+def test_status_flags_dead_daemon(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path / "markers"))
+    _seed_snapshot(tmp_path, monkeypatch,
+                   [{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ CI: ci"}],
+                   getpid=lambda: 2_000_000_000)
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "not running" in out
+    assert "w1:p1" in out  # still shows the (possibly stale) held pane
+
+
+def test_status_no_state(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path / "markers"))
+    monkeypatch.setattr(_state, "STATE_PATH", str(tmp_path / "missing.json"))
+    assert cli.main(["status"]) == 0
+    assert "no state" in capsys.readouterr().out
+
+
+def test_status_lists_markers_and_panes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path / "markers"))
+    MarkerStore(tmp_path / "markers").add("w9:p9", "deploy")
+    _seed_snapshot(tmp_path, monkeypatch,
+                   [{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "w1:p1" in out          # managed pane
+    assert "deploy" in out and "w9:p9" in out  # marker
+
 
 def test_add_and_list_marker(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path))

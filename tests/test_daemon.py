@@ -152,6 +152,41 @@ def test_release_all_releases_managed():
     assert client.releases == ["w1:p1"]
     assert d.managed == {}
 
+def test_tick_snapshots_managed_rows():
+    client = FakeClient([_agent(status="idle")])
+    snaps = []
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               clock=lambda: 0.0, enrich=_ENRICH, on_snapshot=snaps.append)
+    d.tick()
+    assert snaps[-1] == [{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}]
+
+def test_tick_snapshots_empty_when_nothing_held():
+    client = FakeClient([_agent(status="idle")])
+    snaps = []
+    d = Daemon(client, [StaticProbe(None)], clock=lambda: 0.0, enrich=_ENRICH,
+               on_snapshot=snaps.append)
+    d.tick()
+    assert snaps[-1] == []
+
+def test_release_all_snapshots_empty():
+    client = FakeClient([_agent(status="idle")])
+    snaps = []
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               reprobe_interval_s=0, clock=lambda: 0.0, enrich=_ENRICH,
+               on_snapshot=snaps.append)
+    d.tick()
+    d.release_all()
+    assert snaps[-1] == []
+
+def test_raising_snapshot_does_not_crash_tick():
+    client = FakeClient([_agent(status="idle")])
+    def boom(rows):
+        raise RuntimeError("disk full")
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               clock=lambda: 0.0, enrich=_ENRICH, on_snapshot=boom)
+    d.tick()  # must not raise
+    assert "w1:p1" in d.managed  # managed state still correct despite snapshot failure
+
 def test_build_daemon_constructs():
     from herdwatch.config import Config
     from herdwatch.daemon import build_daemon
