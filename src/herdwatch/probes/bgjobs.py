@@ -72,17 +72,20 @@ class BgJobsProbe:
         self._ignore = agent_names
 
     def check(self, ctx: PaneContext) -> Pending | None:
-        info = self._process_info(ctx.pane_id)
-        shell_pid = info.get("shell_pid")
-        fg_pgid = info.get("foreground_process_group_id")
-        if not shell_pid:
+        try:
+            info = self._process_info(ctx.pane_id)
+            shell_pid = info.get("shell_pid")
+            fg_pgid = info.get("foreground_process_group_id")
+            if not shell_pid:
+                return None
+            for p in self._list_descendants(shell_pid):
+                if p.get("pgid") == fg_pgid:
+                    continue
+                if p.get("comm") in self._ignore:
+                    continue
+                if p.get("etime_s", 0) < self._min_age_s:
+                    continue
+                return Pending(label=p.get("comm", "job"), priority=PRIORITY, source=self.name)
             return None
-        for p in self._list_descendants(shell_pid):
-            if p.get("pgid") == fg_pgid:
-                continue
-            if p.get("comm") in self._ignore:
-                continue
-            if p.get("etime_s", 0) < self._min_age_s:
-                continue
-            return Pending(label=p.get("comm", "job"), priority=PRIORITY, source=self.name)
-        return None
+        except Exception:
+            return None
