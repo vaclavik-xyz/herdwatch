@@ -243,6 +243,58 @@ def test_raising_snapshot_does_not_crash_tick():
     d.tick()  # must not raise
     assert "w1:p1" in d.managed  # managed state still correct despite snapshot failure
 
+def test_adopt_seeds_managed_from_rows():
+    d = Daemon(FakeClient([]), [], clock=lambda: 0.0, enrich=_ENRICH)
+    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    assert "w1:p1" in d.managed
+    assert d.managed["w1:p1"].agent == "claude"
+    assert d.managed["w1:p1"].custom_status == "⏳ review"
+
+def test_adopt_ignores_rows_without_pane_id():
+    d = Daemon(FakeClient([]), [], clock=lambda: 0.0, enrich=_ENRICH)
+    d.adopt([{"agent": "claude", "status": "⏳ x"}, {"pane_id": "", "agent": "c"}])
+    assert d.managed == {}
+
+def test_adopted_pane_released_when_work_already_cleared():
+    # a pane we held before a crash, whose background work finished while we were
+    # down, must be released on restart -- not left as an orphan.
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [StaticProbe(None)], reprobe_interval_s=0, clock=lambda: 0.0, enrich=_ENRICH)
+    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    d.tick()
+    assert client.releases == ["w1:p1"]
+    assert "w1:p1" not in d.managed
+
+def test_adopted_pane_gone_is_released_on_restart():
+    # pane closed while the daemon was down -> not in agent_list -> released.
+    client = FakeClient([])
+    d = Daemon(client, [StaticProbe(None)], clock=lambda: 0.0, enrich=_ENRICH)
+    d.adopt([{"pane_id": "w9:p9", "agent": "codex", "status": "⏳ CI: ci"}])
+    d.tick()
+    assert client.releases == ["w9:p9"]
+    assert d.managed == {}
+
+def test_adopted_pane_kept_when_still_pending():
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               reprobe_interval_s=0, clock=lambda: 0.0, enrich=_ENRICH)
+    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    d.tick()
+    assert "w1:p1" in d.managed
+    assert client.releases == []
+
+def test_adopted_pending_pane_is_reasserted_once():
+    # herdr may have lost the old assertion while we were down, so the first tick
+    # must re-report even though the label matches the adopted one -- then settle.
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               reprobe_interval_s=0, clock=lambda: 0.0, enrich=_ENRICH)
+    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    d.tick()
+    assert client.reports == [("w1:p1", "working", "⏳ review")]  # re-asserted despite same label
+    d.tick()
+    assert len(client.reports) == 1  # adopted flag cleared -> no duplicate re-report
+
 def test_build_daemon_constructs():
     from herdwatch.config import Config
     from herdwatch.daemon import build_daemon
