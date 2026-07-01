@@ -1,5 +1,7 @@
 # herdwatch
 
+[![CI](https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml)
+
 Keeps a [herdr](https://herdr.dev) pane shown as **working** with a `⏳` status
 while background work (CI, roborev review, background jobs, manual markers) is
 still pending after the agent went idle — so a finished-looking pane isn't
