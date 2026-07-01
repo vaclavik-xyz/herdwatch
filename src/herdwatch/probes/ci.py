@@ -42,7 +42,7 @@ class CIProbe:
         heads = ctx.worktree_heads or (WorktreeHead(ctx.head_sha, ctx.branch),)
         for head in heads:
             runs = self._cache.get_or(
-                ("ci", ctx.cwd, head.head_sha),
+                ("ci", ctx.cwd, head.head_sha, head.branch),
                 lambda br=head.branch: self._run_gh(ctx.cwd, br))
             if not isinstance(runs, list):
                 continue

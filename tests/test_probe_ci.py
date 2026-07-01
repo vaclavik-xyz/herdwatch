@@ -79,6 +79,20 @@ def test_malformed_runs_for_one_head_do_not_mask_another():
     assert p is not None and p.label == "CI: ci"
 
 
+def test_same_sha_on_two_branches_queries_both():
+    # a fresh worktree branch still sits on the same sha as main; the run
+    # exists only under the worktree's branch, so the branch-filtered query
+    # for main must not be reused for it (cache key must include the branch)
+    same_sha = (WorktreeHead(head_sha="abc", branch="main"),
+                WorktreeHead(head_sha="abc", branch="feat/x"))
+    def run_gh(cwd, br):
+        return [{"headSha": "abc", "status": "in_progress", "workflowName": "ci"}] \
+            if br == "feat/x" else []
+    probe = CIProbe(_cache(), run_gh=run_gh)
+    p = probe.check(_ctx(worktree_heads=same_sha))
+    assert p is not None and p.label == "CI: ci"
+
+
 def test_worktree_run_not_matched_to_wrong_sha():
     # a run on feat/x whose sha matches no local head (e.g. remote moved on)
     # must not hold the pane
