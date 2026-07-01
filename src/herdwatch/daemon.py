@@ -1,8 +1,10 @@
 # src/herdwatch/daemon.py
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+import signal
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -114,9 +116,31 @@ class Daemon:
             if pane_id not in seen:
                 self._last_probe.pop(pane_id, None)
 
+    def release_all(self) -> None:
+        """Release every pane herdwatch currently asserts (clean shutdown)."""
+        for pane_id, mp in list(self.managed.items()):
+            try:
+                self._client.release_agent(pane_id, SOURCE, mp.agent)
+            except Exception:
+                log.warning("failed to release %s on shutdown", pane_id, exc_info=True)
+        self.managed.clear()
+
     def run(self, poll_interval_s: float, sleep: Callable[[float], None] = time.sleep) -> None:
+        atexit.register(self.release_all)
+
+        def _handle_term(signum, frame):
+            self.release_all()
+            raise SystemExit(0)
+
+        try:
+            signal.signal(signal.SIGTERM, _handle_term)
+        except (ValueError, OSError):
+            pass  # not main thread; atexit still covers shutdown
         while True:
-            self.tick()
+            try:
+                self.tick()
+            except Exception:
+                log.exception("tick failed; continuing")
             sleep(poll_interval_s)
 
 

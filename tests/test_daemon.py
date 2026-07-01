@@ -142,6 +142,16 @@ def test_unmanaged_idle_pane_is_throttled():
     d.tick()
     assert len(calls) == 2
 
+def test_release_all_releases_managed():
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               reprobe_interval_s=0, clock=lambda: 0.0, enrich=_ENRICH)
+    d.tick()
+    assert "w1:p1" in d.managed
+    d.release_all()
+    assert client.releases == ["w1:p1"]
+    assert d.managed == {}
+
 def test_build_daemon_constructs():
     from herdwatch.config import Config
     from herdwatch.daemon import build_daemon
