@@ -76,3 +76,34 @@ def test_raising_probe_does_not_crash_tick():
     d = Daemon(client, [Boom()], clock=lambda: 0.0, enrich=_ENRICH)
     d.tick()  # must not raise
     assert client.reports == []  # raising probe treated as no pending
+    assert "w1:p1" not in d.managed
+
+def test_reprobe_throttle_skips_within_interval():
+    now = [0.0]
+    calls = []
+    class Counting:
+        name = "counting"
+        def check(self, ctx):
+            calls.append(now[0])
+            return Pending("review", 30, "roborev")
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [Counting()], reprobe_interval_s=15, clock=lambda: now[0], enrich=_ENRICH)
+    d.tick()
+    assert len(calls) == 1          # first probe
+    now[0] = 5.0
+    d.tick()
+    assert len(calls) == 1          # within interval -> throttled, not re-probed
+    now[0] = 20.0
+    d.tick()
+    assert len(calls) == 2          # past interval -> re-probed
+
+def test_managed_pane_released_when_cleared_even_if_status_working():
+    client = FakeClient([_agent(status="idle")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = Daemon(client, [probe], reprobe_interval_s=0, clock=lambda: 0.0, enrich=_ENRICH)
+    d.tick()                              # managed + asserted
+    client.agents = [_agent(status="working")]  # pane now shows real work
+    probe.result = None                   # background cleared
+    d.tick()
+    assert client.releases == ["w1:p1"]   # managed pane still re-probed and released
+    assert "w1:p1" not in d.managed

@@ -1,6 +1,7 @@
 # src/herdwatch/daemon.py
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -74,6 +75,9 @@ class Daemon:
                 try:
                     r = p.check(ctx)
                 except Exception:
+                    logging.getLogger(__name__).warning(
+                        "probe %r raised; treating as not pending",
+                        getattr(p, "name", p), exc_info=True)
                     r = None
                 if r:
                     pendings.append(r)
