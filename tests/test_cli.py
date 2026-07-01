@@ -24,3 +24,59 @@ def test_rm_marker(tmp_path, monkeypatch):
 def test_rm_requires_id_or_all(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path))
     assert cli.main(["rm"]) == 2
+
+
+def test_doctor_exit_0_when_required_pass(monkeypatch):
+    import herdwatch.doctor as doc
+    from herdwatch.doctor import Check
+    monkeypatch.setattr(doc, "diagnose", lambda: [Check("herdr on PATH", True, True), Check("x", False, False)])
+    assert cli.main(["doctor"]) == 0
+
+
+def test_doctor_exit_1_when_required_fail(monkeypatch):
+    import herdwatch.doctor as doc
+    from herdwatch.doctor import Check
+    monkeypatch.setattr(doc, "diagnose", lambda: [Check("herdr on PATH", False, True)])
+    assert cli.main(["doctor"]) == 1
+
+
+def test_doctor_json(monkeypatch, capsys):
+    import json
+    import herdwatch.doctor as doc
+    from herdwatch.doctor import Check
+    monkeypatch.setattr(doc, "diagnose", lambda: [Check("herdr on PATH", True, True)])
+    assert cli.main(["doctor", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data[0]["name"] == "herdr on PATH"
+
+
+def test_install_service_dry_run(monkeypatch, capsys):
+    import herdwatch.service as svc
+    monkeypatch.setattr(svc, "is_macos", lambda: True)
+    monkeypatch.setattr(svc, "render_plist", lambda: "PLIST-PREVIEW")
+    assert cli.main(["install-service", "--dry-run"]) == 0
+    assert "PLIST-PREVIEW" in capsys.readouterr().out
+
+
+def test_install_service_non_macos_errors(monkeypatch):
+    import herdwatch.service as svc
+    monkeypatch.setattr(svc, "is_macos", lambda: False)
+    assert cli.main(["install-service"]) == 2
+
+
+def test_install_service_installs(monkeypatch):
+    import herdwatch.service as svc
+    calls = []
+    monkeypatch.setattr(svc, "is_macos", lambda: True)
+    monkeypatch.setattr(svc, "install", lambda: calls.append("install") or "done")
+    assert cli.main(["install-service"]) == 0
+    assert calls == ["install"]
+
+
+def test_install_service_uninstall(monkeypatch):
+    import herdwatch.service as svc
+    calls = []
+    monkeypatch.setattr(svc, "is_macos", lambda: True)
+    monkeypatch.setattr(svc, "uninstall", lambda: calls.append("uninstall") or "removed")
+    assert cli.main(["install-service", "--uninstall"]) == 0
+    assert calls == ["uninstall"]

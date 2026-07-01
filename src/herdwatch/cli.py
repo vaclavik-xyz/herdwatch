@@ -4,6 +4,8 @@ import argparse
 import os
 import sys
 
+from . import doctor as _doctor
+from . import service as _service
 from .config import load as load_config
 from .daemon import MARKER_DIR, build_daemon
 from .markers import MarkerStore
@@ -55,6 +57,28 @@ def _cmd_status(args) -> int:
     return 0
 
 
+def _cmd_doctor(args) -> int:
+    checks = _doctor.diagnose()
+    print(_doctor.to_json(checks) if args.json else _doctor.format_report(checks))
+    return _doctor.exit_code(checks)
+
+
+def _cmd_install_service(args) -> int:
+    if not _service.is_macos():
+        print("install-service supports macOS (launchd) only; on Linux run "
+              "`herdwatch daemon` under a supervisor such as a systemd user unit.",
+              file=sys.stderr)
+        return 2
+    if args.uninstall:
+        print(_service.uninstall())
+        return 0
+    if args.dry_run:
+        print(_service.render_plist())
+        return 0
+    print(_service.install())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="herdwatch")
     parser.add_argument("--config", default=None)
@@ -63,6 +87,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("daemon").set_defaults(func=_cmd_daemon)
     sub.add_parser("status").set_defaults(func=_cmd_status)
     sub.add_parser("list").set_defaults(func=_cmd_list)
+
+    p_doctor = sub.add_parser("doctor")
+    p_doctor.add_argument("--json", action="store_true")
+    p_doctor.set_defaults(func=_cmd_doctor)
+
+    p_svc = sub.add_parser("install-service")
+    p_svc.add_argument("--dry-run", action="store_true")
+    p_svc.add_argument("--uninstall", action="store_true")
+    p_svc.set_defaults(func=_cmd_install_service)
 
     p_add = sub.add_parser("add")
     p_add.add_argument("label")
