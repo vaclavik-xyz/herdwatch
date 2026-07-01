@@ -73,8 +73,9 @@ A missing optional tool just disables its probe; it never blocks a pane.
 ## Config (optional)
 
 `~/.config/herdwatch/config.toml` — enable/disable probes, intervals, and
-per-pane `allow`/`deny`. All probes are on by default, so this file is usually
-not needed.
+per-pane `allow`/`deny`. `roborev`, `ci`, and `marker` are on by default;
+`bgjobs` is opt-in (set `enabled = true` under a `[probes.bgjobs]` table). The
+file is usually not needed. See the README Config section for the full example.
 
 ## Conventions (for agents editing this repository)
 

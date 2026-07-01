@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_PATH = os.path.expanduser("~/.config/herdwatch/config.toml")
-_DEFAULT_PROBES = {"roborev": True, "ci": True, "bgjobs": True, "marker": True}
+# bgjobs is opt-in: on an agent multiplexer every pane is an agent, and agents
+# constantly spawn subprocesses, so descendant-scanning yields false positives.
+# The reliable signals (CI, roborev, markers) are on by default.
+_DEFAULT_PROBES = {"roborev": True, "ci": True, "bgjobs": False, "marker": True}
 
 
 @dataclass
@@ -37,6 +40,10 @@ def load(path: str | None = None) -> Config:
         v = probes_data.get(name)
         if isinstance(v, bool):
             cfg.probes[name] = v
+        elif isinstance(v, dict) and isinstance(v.get("enabled"), bool):
+            # a probe can be enabled/disabled from inside its own [probes.X]
+            # table (TOML forbids `X = true` AND `[probes.X]` together)
+            cfg.probes[name] = v["enabled"]
     ci_cfg = probes_data.get("ci")
     if isinstance(ci_cfg, dict):
         cfg.ci_cache_ttl_s = float(ci_cfg.get("cache_ttl_s", cfg.ci_cache_ttl_s))
