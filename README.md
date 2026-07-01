@@ -18,7 +18,7 @@ herdr, no per-agent setup, and it works for any agent herdr tracks.
 
 **From source (recommended for now):**
 
-    git clone <repo-url> herdwatch && cd herdwatch
+    git clone https://github.com/vaclavik-xyz/herdwatch && cd herdwatch
     python3 -m venv .venv && .venv/bin/pip install .
     .venv/bin/herdwatch daemon            # run in the foreground to try it
 
@@ -33,7 +33,7 @@ never blocks a pane.
 
 **As a herdr plugin** (`herdr-plugin.toml` is included):
 
-    herdr plugin install <owner>/herdwatch     # clones + builds a local venv
+    herdr plugin install vaclavik-xyz/herdwatch   # clones + builds a local venv
     herdr plugin pane open --plugin herdwatch --entrypoint daemon
 
 The plugin build creates a `.venv` and installs the package; the `daemon` pane
