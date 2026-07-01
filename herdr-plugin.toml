@@ -1,0 +1,42 @@
+# herdr plugin manifest — herdwatch
+# Lets herdwatch be installed with `herdr plugin install <owner>/herdwatch`.
+# The core is still the standalone daemon; this wrapper just handles install
+# (build a venv) and gives herdr-native ways to run/inspect it.
+# See https://herdr.dev/docs/plugins/
+id = "herdwatch"
+name = "herdwatch"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Keep panes shown as working with a ⏳ status while background work (CI, review, jobs) is still pending after the agent goes idle."
+platforms = ["macos", "linux"]
+
+# On install: create a local venv and install the package into it, so the
+# `herdwatch` console script is available at .venv/bin/herdwatch. Build steps
+# run with the plugin directory as their working directory.
+[[build]]
+command = ["python3", "-m", "venv", ".venv"]
+
+[[build]]
+command = [".venv/bin/pip", "install", "--quiet", "."]
+
+# Run the watcher daemon inside a herdr pane — herdr-native supervision, no
+# launchd needed. Open it with:
+#   herdr plugin pane open --plugin herdwatch --entrypoint daemon
+[[panes]]
+id = "daemon"
+title = "herdwatch daemon"
+placement = "overlay"
+command = [".venv/bin/herdwatch", "daemon"]
+
+# Convenience actions (invoke with: herdr plugin action invoke <id> --plugin herdwatch)
+[[actions]]
+id = "status"
+title = "herdwatch: status"
+contexts = ["workspace"]
+command = [".venv/bin/herdwatch", "status"]
+
+[[actions]]
+id = "list-markers"
+title = "herdwatch: list markers"
+contexts = ["workspace"]
+command = [".venv/bin/herdwatch", "list"]

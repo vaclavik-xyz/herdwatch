@@ -5,13 +5,40 @@ while background work (CI, roborev review, background jobs, manual markers) is
 still pending after the agent went idle — so a finished-looking pane isn't
 mistaken for a done one.
 
-## Install
+## How it works
 
-    pip install -e ".[dev]"
+herdwatch is a standalone background daemon — **not** a herdr fork and not a
+screen-scraper. It talks to herdr over its socket/CLI (herdr's documented plugin
+API surface), polls `herdr agent list`, and for panes that went idle/done runs a
+set of probes. While any probe is pending it asserts `working` + a `⏳` label via
+`herdr pane report-agent`; when they clear it releases the pane. No changes to
+herdr, no per-agent setup, and it works for any agent herdr tracks.
 
-## Run
+## Install & run
 
-    herdwatch daemon          # supervise via deploy/dev.herdwatch.daemon.plist
+**From source (recommended for now):**
+
+    git clone <repo-url> herdwatch && cd herdwatch
+    python3 -m venv .venv && .venv/bin/pip install .
+    .venv/bin/herdwatch daemon            # run in the foreground to try it
+
+Prerequisites: a running herdr; optionally `gh` (authenticated) for the CI probe
+and `roborev` for the review probe. A missing tool just disables its probe — it
+never blocks a pane.
+
+**As a launchd service (auto-start / auto-restart):**
+
+    cp deploy/dev.herdwatch.daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/dev.herdwatch.daemon.plist   # releases panes on unload
+
+**As a herdr plugin** (`herdr-plugin.toml` is included):
+
+    herdr plugin install <owner>/herdwatch     # clones + builds a local venv
+    herdr plugin pane open --plugin herdwatch --entrypoint daemon
+
+The plugin build creates a `.venv` and installs the package; the `daemon` pane
+runs the watcher inside herdr (no launchd needed). `status` and `list-markers`
+actions are registered too.
 
 ## Manual markers
 
@@ -23,13 +50,8 @@ mistaken for a done one.
 
 ## Config
 
-`~/.config/herdwatch/config.toml` — enable/disable probes, intervals. See
-`docs/superpowers/specs/2026-07-01-herdwatch-design.md`.
-
-## Install the launchd agent
-
-    cp deploy/dev.herdwatch.daemon.plist ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/dev.herdwatch.daemon.plist
+`~/.config/herdwatch/config.toml` — enable/disable probes, intervals, per-pane
+`allow`/`deny`. See `docs/superpowers/specs/2026-07-01-herdwatch-design.md`.
 
 ## v1 limitations
 
