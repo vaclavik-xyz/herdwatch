@@ -70,13 +70,15 @@ def _cmd_install_service(args) -> int:
               file=sys.stderr)
         return 2
     if args.uninstall:
-        print(_service.uninstall())
-        return 0
+        rc, msg = _service.uninstall()
+        print(msg)
+        return rc
     if args.dry_run:
         print(_service.render_plist())
         return 0
-    print(_service.install())
-    return 0
+    rc, msg = _service.install()
+    print(msg)
+    return rc
 
 
 def main(argv: list[str] | None = None) -> int:

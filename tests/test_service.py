@@ -17,15 +17,39 @@ def test_render_plist_has_label_exe_path():
 def test_install_writes_and_loads():
     writes = {}
     calls = []
-    msg = service.install(
+    rc, msg = service.install(
         plist_path="/x/dev.herdwatch.daemon.plist",
         run=lambda a: calls.append(a) or (0, ""),
         render=lambda: "PLIST",
         write=lambda path, content: writes.__setitem__(path, content),
     )
+    assert rc == 0
     assert writes["/x/dev.herdwatch.daemon.plist"] == "PLIST"
     assert ["launchctl", "load", "/x/dev.herdwatch.daemon.plist"] in calls
     assert "/x/dev.herdwatch.daemon.plist" in msg
+
+
+def test_install_reports_launchctl_load_failure():
+    rc, msg = service.install(
+        plist_path="/x/p.plist",
+        run=lambda a: (0, "") if a[1] == "unload" else (1, "boom"),
+        render=lambda: "PLIST",
+        write=lambda p, c: None,
+    )
+    assert rc == 1 and "failed" in msg
+
+
+def test_install_uses_injected_module_internals_not_real_system(monkeypatch):
+    # Regression: monkeypatching the module-level helpers must intercept a bare
+    # install() call, so a future test can never touch the real filesystem/launchctl.
+    calls = []
+    monkeypatch.setattr(service, "_run", lambda a: calls.append(a) or (0, ""))
+    monkeypatch.setattr(service, "_write", lambda p, c: calls.append(("write", p)))
+    monkeypatch.setattr(service, "render_plist", lambda: "PLIST")
+    rc, msg = service.install(plist_path="/x/p.plist")
+    assert rc == 0
+    assert ("write", "/x/p.plist") in calls
+    assert ["launchctl", "load", "/x/p.plist"] in calls
 
 
 def test_uninstall_unloads_and_removes():

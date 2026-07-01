@@ -101,18 +101,27 @@ def _remove(path: str) -> None:
 
 
 def install(*, plist_path: str = PLIST_PATH,
-            run: Callable[[list[str]], tuple[int, str]] = _run,
-            render: Callable[[], str] = render_plist,
-            write: Callable[[str, str], None] = _write) -> str:
+            run: Callable[[list[str]], tuple[int, str]] | None = None,
+            render: Callable[[], str] | None = None,
+            write: Callable[[str, str], None] | None = None) -> tuple[int, str]:
+    # None-sentinels resolved at call time so module-attribute monkeypatching of
+    # _run/_write/render_plist actually intercepts (keeps tests off the real system).
+    run = run or _run
+    render = render or render_plist
+    write = write or _write
     write(plist_path, render())
     run(["launchctl", "unload", plist_path])  # tolerate not-yet-loaded
-    run(["launchctl", "load", plist_path])
-    return f"installed and loaded {plist_path}"
+    rc, _ = run(["launchctl", "load", plist_path])
+    if rc != 0:
+        return 1, f"wrote {plist_path} but `launchctl load` failed (rc={rc}); check `herdwatch doctor`"
+    return 0, f"installed and loaded {plist_path}"
 
 
 def uninstall(*, plist_path: str = PLIST_PATH,
-              run: Callable[[list[str]], tuple[int, str]] = _run,
-              remove: Callable[[str], None] = _remove) -> str:
-    run(["launchctl", "unload", plist_path])
+              run: Callable[[list[str]], tuple[int, str]] | None = None,
+              remove: Callable[[str], None] | None = None) -> tuple[int, str]:
+    run = run or _run
+    remove = remove or _remove
+    run(["launchctl", "unload", plist_path])  # ok if it wasn't loaded
     remove(plist_path)
-    return f"unloaded and removed {plist_path}"
+    return 0, f"unloaded and removed {plist_path}"

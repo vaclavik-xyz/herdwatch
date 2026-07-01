@@ -9,7 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
-PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/dev.herdwatch.daemon.plist")
+from .service import PLIST_PATH  # single source of truth for the launchd plist path
 
 
 @dataclass
@@ -48,8 +48,9 @@ def run_checks(*, which: Callable[[str], bool], run: Callable[[list[str]], tuple
     checks.append(Check("herdr on PATH", herdr, True,
                         "" if herdr else "install herdr — https://herdr.dev"))
 
-    running = herdr and run(["herdr", "status"])[0] == 0 and "running" in run(["herdr", "status"])[1].lower()
-    checks.append(Check("herdr server running", bool(running), True,
+    status_rc, status_out = run(["herdr", "status"]) if herdr else (1, "")
+    running = bool(herdr) and status_rc == 0 and "running" in status_out.lower()
+    checks.append(Check("herdr server running", running, True,
                         "" if running else "start herdr (run `herdr`)"))
 
     gh = which("gh") and run(["gh", "auth", "status"])[0] == 0

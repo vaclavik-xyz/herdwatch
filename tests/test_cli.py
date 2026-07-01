@@ -68,15 +68,22 @@ def test_install_service_installs(monkeypatch):
     import herdwatch.service as svc
     calls = []
     monkeypatch.setattr(svc, "is_macos", lambda: True)
-    monkeypatch.setattr(svc, "install", lambda: calls.append("install") or "done")
+    monkeypatch.setattr(svc, "install", lambda: calls.append("install") or (0, "done"))
     assert cli.main(["install-service"]) == 0
     assert calls == ["install"]
+
+
+def test_install_service_propagates_install_failure(monkeypatch):
+    import herdwatch.service as svc
+    monkeypatch.setattr(svc, "is_macos", lambda: True)
+    monkeypatch.setattr(svc, "install", lambda: (1, "load failed"))
+    assert cli.main(["install-service"]) == 1
 
 
 def test_install_service_uninstall(monkeypatch):
     import herdwatch.service as svc
     calls = []
     monkeypatch.setattr(svc, "is_macos", lambda: True)
-    monkeypatch.setattr(svc, "uninstall", lambda: calls.append("uninstall") or "removed")
+    monkeypatch.setattr(svc, "uninstall", lambda: calls.append("uninstall") or (0, "removed"))
     assert cli.main(["install-service", "--uninstall"]) == 0
     assert calls == ["uninstall"]
