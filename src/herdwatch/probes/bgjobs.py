@@ -66,11 +66,13 @@ class BgJobsProbe:
 
     def __init__(self, process_info: Callable[[str], dict], min_age_s: float = 5.0,
                  list_descendants: Callable[[int], list[dict]] = default_list_descendants,
-                 agent_names: frozenset = _DEFAULT_IGNORE) -> None:
+                 agent_names: frozenset = _DEFAULT_IGNORE,
+                 extra_ignore=()) -> None:
         self._process_info = process_info
         self._min_age_s = min_age_s
         self._list_descendants = list_descendants
-        self._ignore = agent_names
+        # built-in defaults plus any user-configured process names
+        self._ignore = frozenset(agent_names) | frozenset(extra_ignore)
 
     def check(self, ctx: PaneContext) -> Pending | None:
         try:

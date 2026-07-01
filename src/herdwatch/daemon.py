@@ -171,7 +171,8 @@ def build_daemon(config: Config, client=None) -> Daemon:
         probes.append(CIProbe(cache))
     if config.probes.get("bgjobs"):
         probes.append(BgJobsProbe(process_info=client.pane_process_info,
-                                  min_age_s=config.bgjobs_min_age_s))
+                                  min_age_s=config.bgjobs_min_age_s,
+                                  extra_ignore=config.bgjobs_ignore))
     return Daemon(client, probes, reprobe_interval_s=config.reprobe_interval_s,
                   allow=config.allow, deny=config.deny,
                   on_snapshot=StateStore().write)

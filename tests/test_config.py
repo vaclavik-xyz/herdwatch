@@ -39,6 +39,19 @@ def test_bgjobs_subtable_sets_min_age_and_keeps_enabled(tmp_path):
     assert cfg.probes["bgjobs"] is True
 
 
+def test_bgjobs_ignore_defaults_empty(tmp_path):
+    cfg = load(str(tmp_path / "nope.toml"))
+    assert cfg.bgjobs_ignore == []
+
+
+def test_bgjobs_ignore_loaded_from_subtable(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[probes.bgjobs]\nignore = ["vite", "webpack"]\n')
+    cfg = load(str(p))
+    assert cfg.bgjobs_ignore == ["vite", "webpack"]
+    assert cfg.probes["bgjobs"] is True
+
+
 def test_panes_allow_deny_and_reprobe_interval_are_loaded(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(
