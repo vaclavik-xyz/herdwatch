@@ -1,4 +1,4 @@
-# herd-wait — design (v1)
+# herdwatch — design (v1)
 
 **Date:** 2026-07-01
 **Status:** approved, pre-implementation
@@ -57,27 +57,27 @@ It does not.
 
 ## Architecture
 
-A standalone Python package **`herdwait`** (new repo at
-`/Users/admin/projects/herd-wait`), exposing:
+A standalone Python package **`herdwatch`** (new repo at
+`/Users/admin/projects/herdwatch`), exposing:
 
-- **`herd-wait daemon`** — long-lived process. Primary trigger: **subscribe to
+- **`herdwatch daemon`** — long-lived process. Primary trigger: **subscribe to
   the herdr socket event `pane.agent_status_changed`** for low latency (reacts
   before herdr's premature `done` notification can fire). A periodic re-probe
   timer (~10–15 s) re-checks panes already under management and acts as a
   safety net for missed events. The socket-streaming client reuses the pattern
   from herdeck (`src/herdeck/protocol.py`, `connector.py`) as a reference.
-- **`herd-wait` CLI** — `add` / `list` / `rm` manual markers, `status`,
+- **`herdwatch` CLI** — `add` / `list` / `rm` manual markers, `status`,
   `daemon`.
 - **launchd** user agent keeps the daemon alive.
 
-All state reports use `source = "herdwait"` via the herdr CLI
+All state reports use `source = "herdwatch"` via the herdr CLI
 (`herdr pane report-agent` / `release-agent`), which is also the documented
 plugin API surface.
 
 ### Components
 
 ```
-herdwait/
+herdwatch/
   daemon.py        # event loop: subscribe + timer, owns the managed-pane set
   herdr_client.py  # socket subscribe + request/response (agent list, pane get, report-agent, release-agent)
   panes.py         # PaneContext: pane_id, agent, cwd, repo, branch, head_sha, terminal_id
@@ -88,8 +88,8 @@ herdwait/
     bgjobs.py
     marker.py
   aggregate.py     # combine probe results -> the asserted custom_status (≤32 chars)
-  markers.py       # read/write ~/.local/state/herd-wait/markers/
-  config.py        # ~/.config/herd-wait/config.toml
+  markers.py       # read/write ~/.local/state/herdwatch/markers/
+  config.py        # ~/.config/herdwatch/config.toml
   cli.py           # argparse entrypoints
 ```
 
@@ -101,14 +101,14 @@ herdwait/
    `git -C <cwd> rev-parse HEAD` / `branch --show-current`), run the enabled
    probes.
 3. **Assert** — if ≥1 probe is *pending* and the pane is currently shown
-   `idle`/`done`: `report-agent <pane> --source herdwait --agent <a>
+   `idle`/`done`: `report-agent <pane> --source herdwatch --agent <a>
    --state working --custom-status "<label>"`. Add pane to the managed set.
 4. **Maintain** — while managed, re-probe every ~15 s; update `custom_status`.
    If the pane is independently driven to `working`/`blocked` by another
    source (the agent started real work), **step aside**: stop managing, do not
    release (we never owned that transition).
 5. **Release** — when **all** probes clear: `release-agent <pane> --source
-   herdwait`. Brief `unknown` self-heals to the real `idle`/`done`; the
+   herdwatch`. Brief `unknown` self-heals to the real `idle`/`done`; the
    resulting `done` pulse is the desired "now it's really finished" signal.
 
 Guard rails:
@@ -127,7 +127,7 @@ Priority orders which label wins when several are pending.
 | **roborev** | `roborev status --json` as a cheap gate (queue empty → skip); else `roborev list --json` → job for repo + HEAD sha in queued/running | `⏳ review` | exact json fields to confirm at impl; `roborev stream` is a possible future push source |
 | **ci** | `gh run list --json status,headSha,workflowName --branch <b>` → run for HEAD sha with `status∈{queued,in_progress}` | `⏳ CI: <wf>` | skip if cwd not a git repo or no GitHub remote; needs `gh` auth |
 | **bgjobs** | best-effort: enumerate the pane's pty child processes (via `terminal_id`→pty→`ps`), excluding the agent, alive > N s | `⏳ <cmd>` | least reliable (`pane process-info` returned empty in testing); conservative defaults; if too noisy → default-off and rely on markers |
-| **marker** | read `~/.local/state/herd-wait/markers/`; a marker is pending while its `--until '<shell test>'` exits 0 / `--pid` alive / `--ttl` not expired | `⏳ <label>` | manual escape hatch; also usable by an agent that wants to push |
+| **marker** | read `~/.local/state/herdwatch/markers/`; a marker is pending while its `--until '<shell test>'` exits 0 / `--pid` alive / `--ttl` not expired | `⏳ <label>` | manual escape hatch; also usable by an agent that wants to push |
 
 ### Aggregation
 - Combine all *pending* results; the highest-priority label is shown.
@@ -146,7 +146,7 @@ Priority orders which label wins when several are pending.
 
 ## Configuration
 
-`~/.config/herd-wait/config.toml`:
+`~/.config/herdwatch/config.toml`:
 
 ```toml
 [daemon]
@@ -173,22 +173,22 @@ deny  = []
 ## CLI
 
 ```
-herd-wait daemon                         # run the watcher (managed by launchd)
-herd-wait status                         # show managed panes + active markers
-herd-wait add "<label>" [--pane ID] [--until '<cmd>' | --pid N | --ttl S]
-herd-wait list                           # list active markers
-herd-wait rm <marker_id|--all>
+herdwatch daemon                         # run the watcher (managed by launchd)
+herdwatch status                         # show managed panes + active markers
+herdwatch add "<label>" [--pane ID] [--until '<cmd>' | --pid N | --ttl S]
+herdwatch list                           # list active markers
+herdwatch rm <marker_id|--all>
 ```
 
 A marker with no explicit `--pane` binds to the caller's `$HERDR_PANE_ID` (so an
-agent can `herd-wait add "deploy" --until 'check.sh'` from inside its own pane).
+agent can `herdwatch add "deploy" --until 'check.sh'` from inside its own pane).
 
 ## Packaging / runtime
 
 - Python ≥3.11, stdlib + `tomllib`; no heavy deps. `gh` and `roborev` invoked as
   subprocesses; herdr via its CLI (`$HERDR_BIN_PATH` or `herdr` on PATH).
-- launchd user agent `~/Library/LaunchAgents/dev.herdwait.daemon.plist` runs
-  `herd-wait daemon` with `KeepAlive`.
+- launchd user agent `~/Library/LaunchAgents/dev.herdwatch.daemon.plist` runs
+  `herdwatch daemon` with `KeepAlive`.
 
 ## Edge cases & risks
 
@@ -227,7 +227,7 @@ agent can `herd-wait add "deploy" --until 'check.sh'` from inside its own pane).
 ## Future (out of v1)
 
 - **herdr plugin wrap** — ship `herdr-plugin.toml` so others can
-  `herdr plugin install <owner>/herd-wait`; the daemon stays the core, the
+  `herdr plugin install <owner>/herdwatch`; the daemon stays the core, the
   plugin provides install + actions.
 - **GB10 / local model (opt-in)** — only as a label/summary formatter ("turn the
   CI log tail into a short human `custom_status`/message"), never as the

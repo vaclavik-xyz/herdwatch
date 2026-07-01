@@ -1,33 +1,33 @@
-# herd-wait Implementation Plan
+# herdwatch Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A standalone daemon that keeps a herdr pane shown as `working` + a `custom_status` label while background work (CI, roborev review, background jobs, manual markers) is still pending after the agent went idle.
 
-**Architecture:** Python package `herdwait`. A polling daemon reads `herdr agent list`, and for panes shown `idle`/`done` runs a set of probes; if any is pending it asserts `working` + `custom_status` via `herdr pane report-agent --source herdwait`, and releases when all clear. Probes are pure, dependency-injected units. v1 triggers by polling (`poll_interval_s` ~4s) with throttled per-pane re-probing (`reprobe_interval_s` ~15s); event subscription to `pane.agent_status_changed` is a documented follow-up.
+**Architecture:** Python package `herdwatch`. A polling daemon reads `herdr agent list`, and for panes shown `idle`/`done` runs a set of probes; if any is pending it asserts `working` + `custom_status` via `herdr pane report-agent --source herdwatch`, and releases when all clear. Probes are pure, dependency-injected units. v1 triggers by polling (`poll_interval_s` ~4s) with throttled per-pane re-probing (`reprobe_interval_s` ~15s); event subscription to `pane.agent_status_changed` is a documented follow-up.
 
 **Tech Stack:** Python ≥3.11 (stdlib only: `tomllib`, `subprocess`, `socket`, `dataclasses`, `argparse`), pytest. External CLIs invoked as subprocesses: `herdr`, `gh`, `roborev`. launchd for process supervision.
 
 ## Global Constraints
 
 - Python ≥3.11, stdlib only (no third-party runtime deps). Test dep: `pytest`.
-- `src/` layout; package import root `herdwait`; console script `herd-wait = "herdwait.cli:main"`.
-- herdr report source string is exactly `"herdwait"` (verbatim) everywhere.
+- `src/` layout; package import root `herdwatch`; console script `herdwatch = "herdwatch.cli:main"`.
+- herdr report source string is exactly `"herdwatch"` (verbatim) everywhere.
 - `custom_status` sent to herdr MUST be ≤32 characters (herdr truncates; we truncate first).
 - Waiting is reported as semantic state `working` only — never `blocked` in v1.
 - All external-tool probes degrade to "not pending" (return `None`) on any error, missing tool, or unparseable output — a broken tool must never pin a pane.
 - Commit messages: conventional commits, English, no `Co-Authored-By`.
-- Marker state dir: `~/.local/state/herd-wait/markers/`. Config: `~/.config/herd-wait/config.toml`.
+- Marker state dir: `~/.local/state/herdwatch/markers/`. Config: `~/.config/herdwatch/config.toml`.
 
 ---
 
 ## File Structure
 
 ```
-herd-wait/
+herdwatch/
   pyproject.toml
   README.md
-  src/herdwait/
+  src/herdwatch/
     __init__.py          # __version__
     models.py            # Pending, PaneContext
     aggregate.py         # aggregate(list[Pending]) -> str | None
@@ -49,7 +49,7 @@ herd-wait/
     test_aggregate.py test_cache.py test_gitctx.py test_config.py
     test_markers.py test_probe_marker.py test_probe_ci.py test_probe_roborev.py
     test_probe_bgjobs.py test_herdr.py test_daemon.py test_cli.py
-  deploy/dev.herdwait.daemon.plist
+  deploy/dev.herdwatch.daemon.plist
 ```
 
 ---
@@ -57,39 +57,39 @@ herd-wait/
 ### Task 1: Project scaffold
 
 **Files:**
-- Create: `pyproject.toml`, `src/herdwait/__init__.py`, `tests/test_smoke.py`, `.gitignore`
+- Create: `pyproject.toml`, `src/herdwatch/__init__.py`, `tests/test_smoke.py`, `.gitignore`
 
 **Interfaces:**
-- Produces: package `herdwait` importable; `herdwait.__version__: str`.
+- Produces: package `herdwatch` importable; `herdwatch.__version__: str`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_smoke.py
-import herdwait
+import herdwatch
 
 def test_version_present():
-    assert isinstance(herdwait.__version__, str)
-    assert herdwait.__version__
+    assert isinstance(herdwatch.__version__, str)
+    assert herdwatch.__version__
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/admin/projects/herd-wait && python -m pytest tests/test_smoke.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait'`
+Run: `cd /Users/admin/projects/herdwatch && python -m pytest tests/test_smoke.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```toml
 # pyproject.toml
 [project]
-name = "herdwait"
+name = "herdwatch"
 version = "0.1.0"
 description = "Show herdr agents as busy while their background work (CI, review, jobs) is still pending"
 requires-python = ">=3.11"
 
 [project.scripts]
-herd-wait = "herdwait.cli:main"
+herdwatch = "herdwatch.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -107,7 +107,7 @@ testpaths = ["tests"]
 ```
 
 ```python
-# src/herdwait/__init__.py
+# src/herdwatch/__init__.py
 __version__ = "0.1.0"
 ```
 
@@ -128,8 +128,8 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add pyproject.toml src/herdwait/__init__.py tests/test_smoke.py .gitignore
-git commit -m "chore: scaffold herdwait package"
+git add pyproject.toml src/herdwatch/__init__.py tests/test_smoke.py .gitignore
+git commit -m "chore: scaffold herdwatch package"
 ```
 
 ---
@@ -137,7 +137,7 @@ git commit -m "chore: scaffold herdwait package"
 ### Task 2: Core models
 
 **Files:**
-- Create: `src/herdwait/models.py`, `tests/test_models.py`
+- Create: `src/herdwatch/models.py`, `tests/test_models.py`
 
 **Interfaces:**
 - Produces:
@@ -148,7 +148,7 @@ git commit -m "chore: scaffold herdwait package"
 
 ```python
 # tests/test_models.py
-from herdwait.models import Pending, PaneContext
+from herdwatch.models import Pending, PaneContext
 
 def test_pending_fields():
     p = Pending(label="CI: ci", priority=20, source="ci")
@@ -163,12 +163,12 @@ def test_pane_context_fields():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_models.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.models'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.models'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/models.py
+# src/herdwatch/models.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -201,7 +201,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/models.py tests/test_models.py
+git add src/herdwatch/models.py tests/test_models.py
 git commit -m "feat: add Pending and PaneContext models"
 ```
 
@@ -210,18 +210,18 @@ git commit -m "feat: add Pending and PaneContext models"
 ### Task 3: Aggregate pending results into a custom_status
 
 **Files:**
-- Create: `src/herdwait/aggregate.py`, `tests/test_aggregate.py`
+- Create: `src/herdwatch/aggregate.py`, `tests/test_aggregate.py`
 
 **Interfaces:**
-- Consumes: `Pending` from `herdwait.models`.
+- Consumes: `Pending` from `herdwatch.models`.
 - Produces: `aggregate(pendings: list[Pending]) -> str | None` — returns a `custom_status` string prefixed with `⏳ `, highest-priority label first, `+N` suffix when more than one, truncated to 32 chars; `None` if the list is empty.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_aggregate.py
-from herdwait.aggregate import aggregate
-from herdwait.models import Pending
+from herdwatch.aggregate import aggregate
+from herdwatch.models import Pending
 
 def test_empty_is_none():
     assert aggregate([]) is None
@@ -242,12 +242,12 @@ def test_truncated_to_32_chars():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_aggregate.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.aggregate'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.aggregate'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/aggregate.py
+# src/herdwatch/aggregate.py
 from __future__ import annotations
 
 from .models import Pending
@@ -278,7 +278,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/aggregate.py tests/test_aggregate.py
+git add src/herdwatch/aggregate.py tests/test_aggregate.py
 git commit -m "feat: aggregate pending probes into a custom_status label"
 ```
 
@@ -287,7 +287,7 @@ git commit -m "feat: aggregate pending probes into a custom_status label"
 ### Task 4: TTL cache (shared by ci/roborev probes)
 
 **Files:**
-- Create: `src/herdwait/cache.py`, `tests/test_cache.py`
+- Create: `src/herdwatch/cache.py`, `tests/test_cache.py`
 
 **Interfaces:**
 - Produces: `TTLCache(ttl_s: float, clock: Callable[[], float] = time.time)` with `get_or(key: Hashable, fn: Callable[[], Any]) -> Any` — calls `fn` and caches its result per `key` until `ttl_s` elapses; within TTL returns the cached value without calling `fn`.
@@ -296,7 +296,7 @@ git commit -m "feat: aggregate pending probes into a custom_status label"
 
 ```python
 # tests/test_cache.py
-from herdwait.cache import TTLCache
+from herdwatch.cache import TTLCache
 
 def test_caches_within_ttl():
     now = [1000.0]
@@ -322,12 +322,12 @@ def test_recomputes_after_ttl():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_cache.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.cache'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.cache'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/cache.py
+# src/herdwatch/cache.py
 from __future__ import annotations
 
 import time
@@ -358,7 +358,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/cache.py tests/test_cache.py
+git add src/herdwatch/cache.py tests/test_cache.py
 git commit -m "feat: add TTLCache for probe result reuse"
 ```
 
@@ -367,7 +367,7 @@ git commit -m "feat: add TTLCache for probe result reuse"
 ### Task 5: Git context enrichment
 
 **Files:**
-- Create: `src/herdwait/gitctx.py`, `tests/test_gitctx.py`
+- Create: `src/herdwatch/gitctx.py`, `tests/test_gitctx.py`
 
 **Interfaces:**
 - Produces:
@@ -380,7 +380,7 @@ git commit -m "feat: add TTLCache for probe result reuse"
 # tests/test_gitctx.py
 import subprocess
 from pathlib import Path
-from herdwait.gitctx import enrich
+from herdwatch.gitctx import enrich
 
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True,
@@ -408,12 +408,12 @@ def test_repo_with_github_remote(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_gitctx.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.gitctx'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.gitctx'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/gitctx.py
+# src/herdwatch/gitctx.py
 from __future__ import annotations
 
 import subprocess
@@ -461,7 +461,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/gitctx.py tests/test_gitctx.py
+git add src/herdwatch/gitctx.py tests/test_gitctx.py
 git commit -m "feat: add git context enrichment"
 ```
 
@@ -470,19 +470,19 @@ git commit -m "feat: add git context enrichment"
 ### Task 6: Config loading
 
 **Files:**
-- Create: `src/herdwait/config.py`, `tests/test_config.py`
+- Create: `src/herdwatch/config.py`, `tests/test_config.py`
 
 **Interfaces:**
 - Produces:
   - `Config(poll_interval_s: float, reprobe_interval_s: float, socket_path: str, probes: dict[str, bool], ci_cache_ttl_s: float, bgjobs_min_age_s: float, allow: list[str], deny: list[str])` — dataclass.
-  - `load(path: str | None = None) -> Config` — reads TOML from `path` or `~/.config/herd-wait/config.toml`; missing file returns all defaults; unknown keys ignored.
+  - `load(path: str | None = None) -> Config` — reads TOML from `path` or `~/.config/herdwatch/config.toml`; missing file returns all defaults; unknown keys ignored.
   - Defaults: `poll_interval_s=4.0`, `reprobe_interval_s=15.0`, `socket_path=""`, `probes={"roborev":True,"ci":True,"bgjobs":True,"marker":True}`, `ci_cache_ttl_s=10.0`, `bgjobs_min_age_s=5.0`, `allow=[]`, `deny=[]`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_config.py
-from herdwait.config import load
+from herdwatch.config import load
 
 def test_defaults_when_missing(tmp_path):
     cfg = load(str(tmp_path / "nope.toml"))
@@ -501,12 +501,12 @@ def test_override(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_config.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.config'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.config'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/config.py
+# src/herdwatch/config.py
 from __future__ import annotations
 
 import os
@@ -514,7 +514,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_PATH = os.path.expanduser("~/.config/herd-wait/config.toml")
+DEFAULT_PATH = os.path.expanduser("~/.config/herdwatch/config.toml")
 _DEFAULT_PROBES = {"roborev": True, "ci": True, "bgjobs": True, "marker": True}
 
 
@@ -563,7 +563,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/config.py tests/test_config.py
+git add src/herdwatch/config.py tests/test_config.py
 git commit -m "feat: add config loading with defaults"
 ```
 
@@ -572,7 +572,7 @@ git commit -m "feat: add config loading with defaults"
 ### Task 7: Marker store
 
 **Files:**
-- Create: `src/herdwait/markers.py`, `tests/test_markers.py`
+- Create: `src/herdwatch/markers.py`, `tests/test_markers.py`
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
@@ -590,7 +590,7 @@ git commit -m "feat: add config loading with defaults"
 
 ```python
 # tests/test_markers.py
-from herdwait.markers import MarkerStore
+from herdwatch.markers import MarkerStore
 
 def _store(tmp_path, **kw):
     return MarkerStore(tmp_path, now=kw.get("now", lambda: 1000.0),
@@ -632,12 +632,12 @@ def test_active_for_pane_prunes(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_markers.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.markers'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.markers'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/markers.py
+# src/herdwatch/markers.py
 from __future__ import annotations
 
 import json
@@ -738,7 +738,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/markers.py tests/test_markers.py
+git add src/herdwatch/markers.py tests/test_markers.py
 git commit -m "feat: add marker store with ttl/pid/until conditions"
 ```
 
@@ -747,7 +747,7 @@ git commit -m "feat: add marker store with ttl/pid/until conditions"
 ### Task 8: Probe protocol + marker probe
 
 **Files:**
-- Create: `src/herdwait/probes/__init__.py`, `src/herdwait/probes/base.py`, `src/herdwait/probes/marker.py`, `tests/test_probe_marker.py`
+- Create: `src/herdwatch/probes/__init__.py`, `src/herdwatch/probes/base.py`, `src/herdwatch/probes/marker.py`, `tests/test_probe_marker.py`
 
 **Interfaces:**
 - Consumes: `Pending`, `PaneContext` (models); `MarkerStore` (markers).
@@ -759,9 +759,9 @@ git commit -m "feat: add marker store with ttl/pid/until conditions"
 
 ```python
 # tests/test_probe_marker.py
-from herdwait.models import PaneContext
-from herdwait.markers import MarkerStore
-from herdwait.probes.marker import MarkerProbe
+from herdwatch.models import PaneContext
+from herdwatch.markers import MarkerStore
+from herdwatch.probes.marker import MarkerProbe
 
 def _ctx(pane="w1:p1"):
     return PaneContext(pane, "claude", "/x", "idle", "sha", "main", True, True)
@@ -779,16 +779,16 @@ def test_marker_pending(tmp_path):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_probe_marker.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.probes'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.probes'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/probes/__init__.py
+# src/herdwatch/probes/__init__.py
 ```
 
 ```python
-# src/herdwait/probes/base.py
+# src/herdwatch/probes/base.py
 from __future__ import annotations
 
 from typing import Protocol
@@ -803,7 +803,7 @@ class Probe(Protocol):
 ```
 
 ```python
-# src/herdwait/probes/marker.py
+# src/herdwatch/probes/marker.py
 from __future__ import annotations
 
 from ..markers import MarkerStore
@@ -833,7 +833,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/probes/ tests/test_probe_marker.py
+git add src/herdwatch/probes/ tests/test_probe_marker.py
 git commit -m "feat: add probe protocol and marker probe"
 ```
 
@@ -842,7 +842,7 @@ git commit -m "feat: add probe protocol and marker probe"
 ### Task 9: CI probe (GitHub Actions via gh)
 
 **Files:**
-- Create: `src/herdwait/probes/ci.py`, `tests/test_probe_ci.py`
+- Create: `src/herdwatch/probes/ci.py`, `tests/test_probe_ci.py`
 
 **Interfaces:**
 - Consumes: `Pending`, `PaneContext`; `TTLCache`.
@@ -854,9 +854,9 @@ git commit -m "feat: add probe protocol and marker probe"
 
 ```python
 # tests/test_probe_ci.py
-from herdwait.cache import TTLCache
-from herdwait.models import PaneContext
-from herdwait.probes.ci import CIProbe
+from herdwatch.cache import TTLCache
+from herdwatch.models import PaneContext
+from herdwatch.probes.ci import CIProbe
 
 def _ctx(**kw):
     d = dict(pane_id="w1:p1", agent="claude", cwd="/x", status="idle",
@@ -888,12 +888,12 @@ def test_none_when_run_is_for_other_sha():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_probe_ci.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.probes.ci'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.probes.ci'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/probes/ci.py
+# src/herdwatch/probes/ci.py
 from __future__ import annotations
 
 import json
@@ -949,7 +949,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/probes/ci.py tests/test_probe_ci.py
+git add src/herdwatch/probes/ci.py tests/test_probe_ci.py
 git commit -m "feat: add CI probe for in-flight GitHub Actions runs"
 ```
 
@@ -958,7 +958,7 @@ git commit -m "feat: add CI probe for in-flight GitHub Actions runs"
 ### Task 10: roborev probe
 
 **Files:**
-- Create: `src/herdwait/probes/roborev.py`, `tests/test_probe_roborev.py`
+- Create: `src/herdwatch/probes/roborev.py`, `tests/test_probe_roborev.py`
 
 **Interfaces:**
 - Consumes: `Pending`, `PaneContext`; `TTLCache`.
@@ -971,9 +971,9 @@ git commit -m "feat: add CI probe for in-flight GitHub Actions runs"
 
 ```python
 # tests/test_probe_roborev.py
-from herdwait.cache import TTLCache
-from herdwait.models import PaneContext
-from herdwait.probes.roborev import RoborevProbe
+from herdwatch.cache import TTLCache
+from herdwatch.models import PaneContext
+from herdwatch.probes.roborev import RoborevProbe
 
 def _ctx(**kw):
     d = dict(pane_id="w1:p1", agent="claude", cwd="/x", status="idle",
@@ -1007,12 +1007,12 @@ def test_none_when_job_done():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_probe_roborev.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.probes.roborev'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.probes.roborev'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/probes/roborev.py
+# src/herdwatch/probes/roborev.py
 from __future__ import annotations
 
 import json
@@ -1081,7 +1081,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/probes/roborev.py tests/test_probe_roborev.py
+git add src/herdwatch/probes/roborev.py tests/test_probe_roborev.py
 git commit -m "feat: add roborev probe for in-flight reviews of HEAD"
 ```
 
@@ -1090,7 +1090,7 @@ git commit -m "feat: add roborev probe for in-flight reviews of HEAD"
 ### Task 11: Background-jobs probe
 
 **Files:**
-- Create: `src/herdwait/probes/bgjobs.py`, `tests/test_probe_bgjobs.py`
+- Create: `src/herdwatch/probes/bgjobs.py`, `tests/test_probe_bgjobs.py`
 
 **Interfaces:**
 - Consumes: `Pending`, `PaneContext`.
@@ -1102,8 +1102,8 @@ git commit -m "feat: add roborev probe for in-flight reviews of HEAD"
 
 ```python
 # tests/test_probe_bgjobs.py
-from herdwait.models import PaneContext
-from herdwait.probes.bgjobs import BgJobsProbe
+from herdwatch.models import PaneContext
+from herdwatch.probes.bgjobs import BgJobsProbe
 
 def _ctx():
     return PaneContext("w1:p1", "claude", "/x", "idle", "sha", "main", True, True)
@@ -1134,12 +1134,12 @@ def test_ignores_young_jobs():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_probe_bgjobs.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.probes.bgjobs'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.probes.bgjobs'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/probes/bgjobs.py
+# src/herdwatch/probes/bgjobs.py
 from __future__ import annotations
 
 import subprocess
@@ -1238,7 +1238,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/probes/bgjobs.py tests/test_probe_bgjobs.py
+git add src/herdwatch/probes/bgjobs.py tests/test_probe_bgjobs.py
 git commit -m "feat: add best-effort background-jobs probe"
 ```
 
@@ -1247,7 +1247,7 @@ git commit -m "feat: add best-effort background-jobs probe"
 ### Task 12: herdr client
 
 **Files:**
-- Create: `src/herdwait/herdr.py`, `tests/test_herdr.py`
+- Create: `src/herdwatch/herdr.py`, `tests/test_herdr.py`
 
 **Interfaces:**
 - Produces: `HerdrClient(herdr_bin: str = "herdr", run=_run)` where `run(args: list[str]) -> tuple[int, str]`:
@@ -1261,7 +1261,7 @@ git commit -m "feat: add best-effort background-jobs probe"
 ```python
 # tests/test_herdr.py
 import json
-from herdwait.herdr import HerdrClient
+from herdwatch.herdr import HerdrClient
 
 def test_agent_list_parses_agents():
     payload = json.dumps({"result": {"agents": [{"pane_id": "w1:p1", "agent_status": "idle"}]}})
@@ -1272,15 +1272,15 @@ def test_agent_list_parses_agents():
 def test_report_agent_builds_command():
     calls = []
     client = HerdrClient(run=lambda args: calls.append(args) or (0, ""))
-    client.report_agent("w1:p1", "herdwait", "claude", "working", "⏳ CI")
-    assert calls[0] == ["herdr", "pane", "report-agent", "w1:p1", "--source", "herdwait",
+    client.report_agent("w1:p1", "herdwatch", "claude", "working", "⏳ CI")
+    assert calls[0] == ["herdr", "pane", "report-agent", "w1:p1", "--source", "herdwatch",
                         "--agent", "claude", "--state", "working", "--custom-status", "⏳ CI"]
 
 def test_release_agent_builds_command():
     calls = []
     client = HerdrClient(run=lambda args: calls.append(args) or (0, ""))
-    client.release_agent("w1:p1", "herdwait", "claude")
-    assert calls[0] == ["herdr", "pane", "release-agent", "w1:p1", "--source", "herdwait", "--agent", "claude"]
+    client.release_agent("w1:p1", "herdwatch", "claude")
+    assert calls[0] == ["herdr", "pane", "release-agent", "w1:p1", "--source", "herdwatch", "--agent", "claude"]
 
 def test_agent_list_empty_on_error():
     assert HerdrClient(run=lambda args: (1, "")).agent_list() == []
@@ -1289,12 +1289,12 @@ def test_agent_list_empty_on_error():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_herdr.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.herdr'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.herdr'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/herdr.py
+# src/herdwatch/herdr.py
 from __future__ import annotations
 
 import json
@@ -1354,7 +1354,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/herdr.py tests/test_herdr.py
+git add src/herdwatch/herdr.py tests/test_herdr.py
 git commit -m "feat: add herdr CLI client"
 ```
 
@@ -1363,12 +1363,12 @@ git commit -m "feat: add herdr CLI client"
 ### Task 13: Daemon state machine
 
 **Files:**
-- Create: `src/herdwait/daemon.py`, `tests/test_daemon.py`
+- Create: `src/herdwatch/daemon.py`, `tests/test_daemon.py`
 
 **Interfaces:**
 - Consumes: `HerdrClient` (duck-typed: `agent_list`, `report_agent`, `release_agent`); probes (`check(ctx)`); `aggregate`; `gitctx.enrich`.
 - Produces:
-  - `SOURCE = "herdwait"`.
+  - `SOURCE = "herdwatch"`.
   - `ManagedPane(custom_status: str, last_probe: float, agent: str)` — dataclass.
   - `Daemon(client, probes, reprobe_interval_s=15.0, clock=time.time, enrich=gitctx.enrich)` with `tick() -> None` (one polling iteration) and `managed: dict[str, ManagedPane]`.
   - `build_daemon(config, client=None) -> Daemon` factory wiring real probes.
@@ -1377,9 +1377,9 @@ git commit -m "feat: add herdr CLI client"
 
 ```python
 # tests/test_daemon.py
-from herdwait.daemon import Daemon, SOURCE
-from herdwait.gitctx import GitInfo
-from herdwait.models import Pending
+from herdwatch.daemon import Daemon, SOURCE
+from herdwatch.gitctx import GitInfo
+from herdwatch.models import Pending
 
 class FakeClient:
     def __init__(self, agents):
@@ -1449,12 +1449,12 @@ def test_drops_vanished_pane():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_daemon.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'herdwait.daemon'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'herdwatch.daemon'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/daemon.py
+# src/herdwatch/daemon.py
 from __future__ import annotations
 
 import os
@@ -1474,8 +1474,8 @@ from .probes.ci import CIProbe
 from .probes.marker import MarkerProbe
 from .probes.roborev import RoborevProbe
 
-SOURCE = "herdwait"
-MARKER_DIR = os.path.expanduser("~/.local/state/herd-wait/markers")
+SOURCE = "herdwatch"
+MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
 
 
 @dataclass
@@ -1569,7 +1569,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/daemon.py tests/test_daemon.py
+git add src/herdwatch/daemon.py tests/test_daemon.py
 git commit -m "feat: add daemon state machine and wiring factory"
 ```
 
@@ -1578,7 +1578,7 @@ git commit -m "feat: add daemon state machine and wiring factory"
 ### Task 14: CLI
 
 **Files:**
-- Create: `src/herdwait/cli.py`, `tests/test_cli.py`
+- Create: `src/herdwatch/cli.py`, `tests/test_cli.py`
 
 **Interfaces:**
 - Consumes: `config.load`, `daemon.build_daemon`, `MarkerStore`, `daemon.MARKER_DIR`.
@@ -1589,8 +1589,8 @@ git commit -m "feat: add daemon state machine and wiring factory"
 ```python
 # tests/test_cli.py
 import json
-from herdwait import cli
-from herdwait.markers import MarkerStore
+from herdwatch import cli
+from herdwatch.markers import MarkerStore
 
 def test_add_and_list_marker(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path))
@@ -1616,12 +1616,12 @@ def test_rm_marker(tmp_path, monkeypatch):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_cli.py -v`
-Expected: FAIL — `AttributeError` / `ModuleNotFoundError: No module named 'herdwait.cli'`
+Expected: FAIL — `AttributeError` / `ModuleNotFoundError: No module named 'herdwatch.cli'`
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/herdwait/cli.py
+# src/herdwatch/cli.py
 from __future__ import annotations
 
 import argparse
@@ -1677,7 +1677,7 @@ def _cmd_status(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="herd-wait")
+    parser = argparse.ArgumentParser(prog="herdwatch")
     parser.add_argument("--config", default=None)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -1710,8 +1710,8 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwait/cli.py tests/test_cli.py
-git commit -m "feat: add herd-wait CLI"
+git add src/herdwatch/cli.py tests/test_cli.py
+git commit -m "feat: add herdwatch CLI"
 ```
 
 ---
@@ -1719,23 +1719,23 @@ git commit -m "feat: add herd-wait CLI"
 ### Task 15: Packaging — launchd plist + README + full suite
 
 **Files:**
-- Create: `deploy/dev.herdwait.daemon.plist`, `README.md`
+- Create: `deploy/dev.herdwatch.daemon.plist`, `README.md`
 
 **Interfaces:**
-- Produces: launchd unit that runs `herd-wait daemon`; README with install + usage.
+- Produces: launchd unit that runs `herdwatch daemon`; README with install + usage.
 
 - [ ] **Step 1: Write the launchd plist**
 
 ```xml
-<!-- deploy/dev.herdwait.daemon.plist -->
+<!-- deploy/dev.herdwatch.daemon.plist -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>dev.herdwait.daemon</string>
+  <key>Label</key><string>dev.herdwatch.daemon</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/admin/projects/herd-wait/.venv/bin/herd-wait</string>
+    <string>/Users/admin/projects/herdwatch/.venv/bin/herdwatch</string>
     <string>daemon</string>
   </array>
   <key>EnvironmentVariables</key>
@@ -1744,8 +1744,8 @@ git commit -m "feat: add herd-wait CLI"
   </dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>/tmp/herdwait.out.log</string>
-  <key>StandardErrorPath</key><string>/tmp/herdwait.err.log</string>
+  <key>StandardOutPath</key><string>/tmp/herdwatch.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/herdwatch.err.log</string>
 </dict>
 </plist>
 ```
@@ -1753,7 +1753,7 @@ git commit -m "feat: add herd-wait CLI"
 - [ ] **Step 2: Write the README**
 
 ```markdown
-# herd-wait
+# herdwatch
 
 Keeps a [herdr](https://herdr.dev) pane shown as **working** with a `⏳` status
 while background work (CI, roborev review, background jobs, manual markers) is
@@ -1766,24 +1766,24 @@ mistaken for a done one.
 
 ## Run
 
-    herd-wait daemon          # supervise via deploy/dev.herdwait.daemon.plist
+    herdwatch daemon          # supervise via deploy/dev.herdwatch.daemon.plist
 
 ## Manual markers
 
-    herd-wait add "deploy" --until 'gh run watch --exit-status'
-    herd-wait add "backup" --ttl 600
-    herd-wait list
-    herd-wait rm <id>
+    herdwatch add "deploy" --until 'gh run watch --exit-status'
+    herdwatch add "backup" --ttl 600
+    herdwatch list
+    herdwatch rm <id>
 
 ## Config
 
-`~/.config/herd-wait/config.toml` — enable/disable probes, intervals. See
-`docs/superpowers/specs/2026-07-01-herd-wait-design.md`.
+`~/.config/herdwatch/config.toml` — enable/disable probes, intervals. See
+`docs/superpowers/specs/2026-07-01-herdwatch-design.md`.
 
 ## Install the launchd agent
 
-    cp deploy/dev.herdwait.daemon.plist ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/dev.herdwait.daemon.plist
+    cp deploy/dev.herdwatch.daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/dev.herdwatch.daemon.plist
 ```
 
 - [ ] **Step 3: Run the full test suite**
@@ -1794,7 +1794,7 @@ Expected: PASS (all tasks' tests green)
 - [ ] **Step 4: Commit**
 
 ```bash
-git add deploy/dev.herdwait.daemon.plist README.md
+git add deploy/dev.herdwatch.daemon.plist README.md
 git commit -m "docs: add launchd unit and README"
 ```
 
@@ -1806,7 +1806,7 @@ Not a task; run once after the suite is green. Mirrors the design's feasibility
 experiments and must target a throwaway split pane, never a live agent:
 
 1. `herdr pane split --pane <your> --direction down --ratio 0.2 --no-focus` → note new pane id.
-2. Start the daemon; from the new pane run a fake long job (`sleep 120 &`) or `herd-wait add test --ttl 60`.
+2. Start the daemon; from the new pane run a fake long job (`sleep 120 &`) or `herdwatch add test --ttl 60`.
 3. Confirm `herdr pane get <new>` shows `agent_status=working` + `custom_status` while pending.
 4. Clear the marker / let the job finish; confirm it releases and self-heals.
 5. `herdr pane close <new>`.
@@ -1820,7 +1820,7 @@ experiments and must target a throwaway split pane, never a live agent:
 - Auto-detection, all-panes, agent-agnostic → Task 13 (`tick` over `agent_list`). ✓
 - Probes: roborev / ci / bgjobs / marker → Tasks 10, 9, 11, 8. ✓
 - State machine (assert/maintain/release, idempotent, only when idle/done) → Task 13. ✓
-- 32-char truncation, `working` only, source `herdwait` → Tasks 3, 12, 13 + Global Constraints. ✓
+- 32-char truncation, `working` only, source `herdwatch` → Tasks 3, 12, 13 + Global Constraints. ✓
 - Performance caching by (repo, sha) + roborev status gate → Tasks 4, 9, 10, 13 (reprobe throttle). ✓
 - Config schema → Task 6. ✓
 - CLI + markers → Tasks 7, 14. ✓
