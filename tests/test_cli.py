@@ -1,4 +1,3 @@
-import json
 from herdwatch import cli
 from herdwatch.markers import MarkerStore
 
@@ -21,3 +20,7 @@ def test_rm_marker(tmp_path, monkeypatch):
     m = store.add("w1:p1", "deploy")
     assert cli.main(["rm", m.id]) == 0
     assert store.all() == []
+
+def test_rm_requires_id_or_all(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path))
+    assert cli.main(["rm"]) == 2

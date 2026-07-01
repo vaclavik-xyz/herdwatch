@@ -37,6 +37,9 @@ def _cmd_list(args) -> int:
 
 
 def _cmd_rm(args) -> int:
+    if not args.all and not args.marker_id:
+        print("rm: provide a marker id or --all", file=sys.stderr)
+        return 2
     store = _store()
     if args.all:
         for m in store.all():
