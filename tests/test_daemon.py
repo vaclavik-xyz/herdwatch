@@ -107,3 +107,46 @@ def test_managed_pane_released_when_cleared_even_if_status_working():
     d.tick()
     assert client.releases == ["w1:p1"]   # managed pane still re-probed and released
     assert "w1:p1" not in d.managed
+
+def test_deny_skips_pane():
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               clock=lambda: 0.0, enrich=_ENRICH, deny=["w1:p1"])
+    d.tick()
+    assert client.reports == []
+    assert d.managed == {}
+
+def test_allow_only_listed():
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               clock=lambda: 0.0, enrich=_ENRICH, allow=["w2:p2"])
+    d.tick()
+    assert client.reports == []  # w1:p1 not in allow-list
+
+def test_unmanaged_idle_pane_is_throttled():
+    now = [0.0]
+    calls = []
+    class Counting:
+        name = "counting"
+        def check(self, ctx):
+            calls.append(now[0])
+            return None  # never pending -> pane stays unmanaged
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(client, [Counting()], reprobe_interval_s=15, clock=lambda: now[0], enrich=_ENRICH)
+    d.tick()
+    assert len(calls) == 1
+    now[0] = 5.0
+    d.tick()
+    assert len(calls) == 1   # unmanaged idle pane throttled, not re-probed every tick
+    now[0] = 20.0
+    d.tick()
+    assert len(calls) == 2
+
+def test_build_daemon_constructs():
+    from herdwatch.config import Config
+    from herdwatch.daemon import build_daemon
+    class FakeC:
+        def pane_process_info(self, pid):
+            return {}
+    d = build_daemon(Config(), client=FakeC())
+    assert len(d._probes) == 4  # all four probes enabled by default

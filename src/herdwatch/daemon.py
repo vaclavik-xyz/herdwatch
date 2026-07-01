@@ -21,25 +21,37 @@ from .probes.roborev import RoborevProbe
 
 SOURCE = "herdwatch"
 MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
+log = logging.getLogger(__name__)
 
 
 @dataclass
 class ManagedPane:
     custom_status: str
-    last_probe: float
     agent: str
 
 
 class Daemon:
     def __init__(self, client, probes, reprobe_interval_s: float = 15.0,
                  clock: Callable[[], float] = time.time,
-                 enrich: Callable[[str], gitctx.GitInfo] = gitctx.enrich) -> None:
+                 enrich: Callable[[str], gitctx.GitInfo] = gitctx.enrich,
+                 allow: list[str] | None = None,
+                 deny: list[str] | None = None) -> None:
         self._client = client
         self._probes = probes
         self._reprobe = reprobe_interval_s
         self._clock = clock
         self._enrich = enrich
+        self._allow = set(allow or [])
+        self._deny = set(deny or [])
         self.managed: dict[str, ManagedPane] = {}
+        self._last_probe: dict[str, float] = {}
+
+    def _eligible(self, pane_id: str) -> bool:
+        if self._deny and pane_id in self._deny:
+            return False
+        if self._allow and pane_id not in self._allow:
+            return False
+        return True
 
     def _context(self, agent: dict) -> PaneContext:
         cwd = agent.get("cwd") or agent.get("foreground_cwd") or ""
@@ -59,15 +71,19 @@ class Daemon:
         seen = set()
         for agent in self._client.agent_list():
             pane_id = agent.get("pane_id")
-            if not pane_id:
+            if not pane_id or not self._eligible(pane_id):
                 continue
             seen.add(pane_id)
             status = agent.get("agent_status") or "unknown"
             managed = pane_id in self.managed
             if not managed and status not in ("idle", "done"):
+                # not ours and busy: forget its timer so a fresh idle edge
+                # probes immediately
+                self._last_probe.pop(pane_id, None)
                 continue
             now = self._clock()
-            if managed and (now - self.managed[pane_id].last_probe) < self._reprobe:
+            last = self._last_probe.get(pane_id)
+            if last is not None and (now - last) < self._reprobe:
                 continue
             ctx = self._context(agent)
             pendings = []
@@ -75,24 +91,28 @@ class Daemon:
                 try:
                     r = p.check(ctx)
                 except Exception:
-                    logging.getLogger(__name__).warning(
-                        "probe %r raised; treating as not pending",
-                        getattr(p, "name", p), exc_info=True)
+                    log.warning("probe %r raised; treating as not pending",
+                                getattr(p, "name", p), exc_info=True)
                     r = None
                 if r:
                     pendings.append(r)
+            self._last_probe[pane_id] = now
             label = aggregate(pendings)
             if label:
                 agent_name = ctx.agent
                 if not managed or self.managed[pane_id].custom_status != label:
                     self._client.report_agent(pane_id, SOURCE, agent_name, "working", label)
-                self.managed[pane_id] = ManagedPane(label, now, agent_name)
+                self.managed[pane_id] = ManagedPane(label, agent_name)
             elif managed:
                 self._client.release_agent(pane_id, SOURCE, self.managed[pane_id].agent)
                 del self.managed[pane_id]
+        # drop bookkeeping for panes that vanished from the list
         for pane_id in list(self.managed):
             if pane_id not in seen:
                 del self.managed[pane_id]
+        for pane_id in list(self._last_probe):
+            if pane_id not in seen:
+                self._last_probe.pop(pane_id, None)
 
     def run(self, poll_interval_s: float, sleep: Callable[[float], None] = time.sleep) -> None:
         while True:
@@ -113,4 +133,5 @@ def build_daemon(config: Config, client=None) -> Daemon:
     if config.probes.get("bgjobs"):
         probes.append(BgJobsProbe(process_info=client.pane_process_info,
                                   min_age_s=config.bgjobs_min_age_s))
-    return Daemon(client, probes, reprobe_interval_s=config.reprobe_interval_s)
+    return Daemon(client, probes, reprobe_interval_s=config.reprobe_interval_s,
+                  allow=config.allow, deny=config.deny)
