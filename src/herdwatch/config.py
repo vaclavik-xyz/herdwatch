@@ -14,11 +14,11 @@ class Config:
     poll_interval_s: float = 4.0
     reprobe_interval_s: float = 15.0
     socket_path: str = ""
-    probes: dict = field(default_factory=lambda: dict(_DEFAULT_PROBES))
+    probes: dict[str, bool] = field(default_factory=lambda: dict(_DEFAULT_PROBES))
     ci_cache_ttl_s: float = 10.0
     bgjobs_min_age_s: float = 5.0
-    allow: list = field(default_factory=list)
-    deny: list = field(default_factory=list)
+    allow: list[str] = field(default_factory=list)
+    deny: list[str] = field(default_factory=list)
 
 
 def load(path: str | None = None) -> Config:
@@ -31,11 +31,15 @@ def load(path: str | None = None) -> Config:
     cfg.poll_interval_s = float(daemon.get("poll_interval_s", cfg.poll_interval_s))
     cfg.reprobe_interval_s = float(daemon.get("reprobe_interval_s", cfg.reprobe_interval_s))
     cfg.socket_path = str(daemon.get("socket_path", cfg.socket_path))
+    probes_data = data.get("probes", {})
     for name in _DEFAULT_PROBES:
-        cfg.probes[name] = bool(data.get("probes", {}).get(name, cfg.probes[name]))
-    cfg.ci_cache_ttl_s = float(data.get("probes", {}).get("ci", {}).get("cache_ttl_s", cfg.ci_cache_ttl_s)) \
-        if isinstance(data.get("probes", {}).get("ci"), dict) else cfg.ci_cache_ttl_s
-    bg = data.get("probes", {}).get("bgjobs")
+        v = probes_data.get(name)
+        if isinstance(v, bool):
+            cfg.probes[name] = v
+    ci_cfg = probes_data.get("ci")
+    if isinstance(ci_cfg, dict):
+        cfg.ci_cache_ttl_s = float(ci_cfg.get("cache_ttl_s", cfg.ci_cache_ttl_s))
+    bg = probes_data.get("bgjobs")
     if isinstance(bg, dict):
         cfg.bgjobs_min_age_s = float(bg.get("min_age_s", cfg.bgjobs_min_age_s))
     panes = data.get("panes", {})
