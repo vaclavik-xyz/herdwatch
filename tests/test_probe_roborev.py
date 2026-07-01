@@ -1,5 +1,5 @@
 from herdwatch.cache import TTLCache
-from herdwatch.models import PaneContext
+from herdwatch.models import PaneContext, WorktreeHead
 from herdwatch.probes.roborev import RoborevProbe
 
 
@@ -55,6 +55,15 @@ def test_malformed_top_level_job_list_returns_none():
     probe = RoborevProbe(_cache(), run_status=lambda: _BUSY,
                          run_list=lambda cwd: 1)
     assert probe.check(_ctx()) is None
+
+
+def test_pending_when_job_matches_worktree_head_not_cwd_head():
+    heads = (WorktreeHead(head_sha="abc", branch="main"),
+             WorktreeHead(head_sha="def", branch="feat/x"))
+    probe = RoborevProbe(_cache(), run_status=lambda: _BUSY,
+                         run_list=lambda cwd: [{"git_ref": "def", "status": "running"}])
+    p = probe.check(_ctx(worktree_heads=heads))
+    assert p is not None and p.label == "review"
 
 
 def test_malformed_daemon_job_counts_return_none():
