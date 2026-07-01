@@ -2,7 +2,12 @@
 name = "herdwatch"
 version = "0.1.0"
 description = "Show herdr agents as busy while their background work (CI, review, jobs) is still pending"
+readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
 
 [project.scripts]
 herdwatch = "herdwatch.cli:main"
