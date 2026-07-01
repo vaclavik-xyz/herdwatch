@@ -5,6 +5,9 @@ while background work (CI, roborev review, background jobs, manual markers) is
 still pending after the agent went idle — so a finished-looking pane isn't
 mistaken for a done one.
 
+> **Setting this up via a coding agent?** Point it at [AGENTS.md](AGENTS.md) — a
+> runbook it can follow to install, enable, and verify herdwatch on your machine.
+
 ## How it works
 
 herdwatch is a standalone background daemon — **not** a herdr fork and not a
@@ -20,16 +23,22 @@ herdr, no per-agent setup, and it works for any agent herdr tracks.
 
     git clone https://github.com/vaclavik-xyz/herdwatch && cd herdwatch
     python3 -m venv .venv && .venv/bin/pip install .
+    .venv/bin/herdwatch doctor            # check herdr is reachable + what's set up
     .venv/bin/herdwatch daemon            # run in the foreground to try it
 
 Prerequisites: a running herdr; optionally `gh` (authenticated) for the CI probe
 and `roborev` for the review probe. A missing tool just disables its probe — it
 never blocks a pane.
 
-**As a launchd service (auto-start / auto-restart):**
+**As a launchd service (auto-start / auto-restart), macOS:**
 
-    cp deploy/dev.herdwatch.daemon.plist ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/dev.herdwatch.daemon.plist   # releases panes on unload
+    herdwatch install-service              # generate a plist with the right paths for THIS machine + load it
+    herdwatch install-service --dry-run    # preview the plist first
+    herdwatch install-service --uninstall  # unload + remove
+
+(`deploy/dev.herdwatch.daemon.plist` is only a static example; `install-service`
+generates the real one so the paths are correct on any machine. Unloading the
+service releases all panes herdwatch manages.)
 
 **As a herdr plugin** (`herdr-plugin.toml` is included):
 
