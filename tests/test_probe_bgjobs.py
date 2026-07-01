@@ -39,6 +39,14 @@ def test_ignores_known_agent_name():
     assert probe.check(_ctx()) is None
 
 
+def test_ignores_codex_node_repl_helper():
+    # /Applications/Codex.app/Contents/Resources/node_repl is a Codex runtime
+    # helper that lives as long as the agent does -> not a background job.
+    desc = [{"pid": 404, "pgid": 404, "etime_s": 3600, "comm": "node_repl"}]
+    probe = BgJobsProbe(process_info=lambda pid: _INFO, list_descendants=lambda root: desc)
+    assert probe.check(_ctx()) is None
+
+
 def test_raising_process_info_degrades_to_none():
     def boom(pid):
         raise RuntimeError("herdr unavailable")

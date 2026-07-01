@@ -6,7 +6,8 @@ from typing import Callable
 from ..models import PaneContext, Pending
 
 PRIORITY = 10
-_DEFAULT_IGNORE = frozenset({"claude", "codex", "node", "caffeinate", "sh", "zsh", "bash"})
+_DEFAULT_IGNORE = frozenset({"claude", "codex", "node", "node_repl",
+                             "caffeinate", "sh", "zsh", "bash"})
 
 
 def _parse_etime(raw: str) -> float:
