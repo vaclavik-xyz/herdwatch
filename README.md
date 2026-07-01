@@ -2,10 +2,19 @@
 
 [![CI](https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml)
 
-Keeps a [herdr](https://herdr.dev) pane shown as **working** with a `⏳` status
-while background work (CI, roborev review, manual markers, and — opt-in —
-background jobs) is still pending after the agent went idle — so a
-finished-looking pane isn't mistaken for a done one.
+## The problem
+
+Your coding agent finishes its turn, so [herdr](https://herdr.dev) shows the
+pane `idle`/`done`. But the work isn't actually done: you just merged and CI is
+running, a post-commit review is in flight, or a job is still going in the
+background. You glance at the sidebar, see "done", switch to that pane — and
+nothing's happening, because the real work is off-screen. So a pane that *looks*
+finished isn't, and you can't trust the sidebar at a glance.
+
+herdwatch fixes that: while background work is still pending after an agent goes
+idle, it keeps that pane shown as **working** with a `⏳` label saying what it's
+waiting on (CI, roborev review, a manual marker, or — opt-in — a background job),
+and releases it the moment the work clears.
 
 > **Setting this up via a coding agent?** Point it at [AGENTS.md](AGENTS.md) — a
 > runbook it can follow to install, enable, and verify herdwatch on your machine.
@@ -18,6 +27,13 @@ API surface), polls `herdr agent list`, and for panes that went idle/done runs a
 set of probes. While any probe is pending it asserts `working` + a `⏳` label via
 `herdr pane report-agent`; when they clear it releases the pane. No changes to
 herdr, no per-agent setup, and it works for any agent herdr tracks.
+
+**The key trick** (reusable for any similar tool): a state reported through
+`herdr pane report-agent --source <name>` is *authoritative and durable over
+herdr's own screen-detection* for as long as that source holds it. So herdwatch
+never fights the screen scraper — it just asserts `working` from its own source
+and later releases, and herdr honours it. That single property is what makes a
+non-invasive "hold this pane" daemon possible without forking herdr.
 
 The daemon also publishes the set of panes it is currently holding (and the
 recorded `⏳` label per pane) to a small JSON state file
