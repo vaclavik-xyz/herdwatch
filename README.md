@@ -3,9 +3,9 @@
 [![CI](https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml)
 
 Keeps a [herdr](https://herdr.dev) pane shown as **working** with a `⏳` status
-while background work (CI, roborev review, background jobs, manual markers) is
-still pending after the agent went idle — so a finished-looking pane isn't
-mistaken for a done one.
+while background work (CI, roborev review, manual markers, and — opt-in —
+background jobs) is still pending after the agent went idle — so a
+finished-looking pane isn't mistaken for a done one.
 
 > **Setting this up via a coding agent?** Point it at [AGENTS.md](AGENTS.md) — a
 > runbook it can follow to install, enable, and verify herdwatch on your machine.
@@ -70,7 +70,7 @@ actions are registered too.
 
 `~/.config/herdwatch/config.toml` — enable/disable probes, intervals, per-pane
 `allow`/`deny`, and per-probe tuning. Everything has a sensible default; the
-file is optional. See `docs/superpowers/specs/2026-07-01-herdwatch-design.md`.
+file is optional. The full set of keys:
 
 ```toml
 [daemon]
@@ -78,12 +78,14 @@ poll_interval_s = 4         # how often to re-check herdr
 reprobe_interval_s = 15     # min seconds between probing the same pane
 
 [probes]
-ci = true                   # toggle any probe on/off (roborev, ci, bgjobs, marker)
-roborev = true
+ci = true                   # on by default: roborev, ci, marker
+roborev = true              # bgjobs is OFF by default (opt-in below)
 
-# Per-probe tuning goes in its own table. Don't ALSO list the probe as a
-# boolean above — TOML rejects a key that is both a value and a table.
+# Per-probe tuning goes in its own table. Because TOML forbids a key that is
+# both a value and a table, enable/disable a tuned probe with `enabled` INSIDE
+# its table (not `bgjobs = true` under [probes] as well).
 [probes.bgjobs]
+enabled = true              # opt in to background-job detection
 min_age_s = 5               # ignore just-spawned processes
 ignore = ["vite", "webpack"]  # extra process names to treat as "not a job"
                               # (added on top of the built-in defaults)
@@ -93,10 +95,14 @@ allow = []                  # if non-empty, only manage these pane ids
 deny  = []                  # never manage these pane ids
 ```
 
-The `[probes.bgjobs] ignore` list is how you teach the background-job probe
-about long-lived helper processes it should not wait on (an agent's own
-runtime, an editor daemon, etc.) — no code change needed, just restart the
-daemon.
+**Why bgjobs is opt-in:** herdr is an agent multiplexer, so every pane runs an
+agent, and agents constantly spawn short-lived subprocesses (`sleep`, `git`,
+test runners, an editor daemon, their own runtime). The background-job probe
+scans a pane's process tree, so on agent panes it readily mistakes those for
+"work" and holds the pane. The reliable signals — CI, roborev, and manual
+markers — are on by default; enable bgjobs only on panes where you actually run
+long jobs by hand, and use `[probes.bgjobs] ignore` to teach it which process
+names to skip.
 
 ## v1 limitations
 

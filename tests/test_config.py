@@ -4,7 +4,7 @@ from herdwatch.config import load
 def test_defaults_when_missing(tmp_path):
     cfg = load(str(tmp_path / "nope.toml"))
     assert cfg.poll_interval_s == 4.0
-    assert cfg.probes == {"roborev": True, "ci": True, "bgjobs": True, "marker": True}
+    assert cfg.probes == {"roborev": True, "ci": True, "bgjobs": False, "marker": True}
 
 
 def test_override(tmp_path):
@@ -31,12 +31,28 @@ def test_ci_subtable_sets_cache_ttl_and_keeps_enabled(tmp_path):
     assert cfg.ci_cache_ttl_s == 30
 
 
-def test_bgjobs_subtable_sets_min_age_and_keeps_enabled(tmp_path):
+def test_bgjobs_subtable_sets_min_age_without_enabling(tmp_path):
+    # tuning alone does not enable an off-by-default probe
     p = tmp_path / "c.toml"
     p.write_text('[probes.bgjobs]\nmin_age_s = 20\n')
     cfg = load(str(p))
     assert cfg.bgjobs_min_age_s == 20
+    assert cfg.probes["bgjobs"] is False
+
+
+def test_bgjobs_enabled_via_subtable(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[probes.bgjobs]\nenabled = true\nmin_age_s = 30\n')
+    cfg = load(str(p))
     assert cfg.probes["bgjobs"] is True
+    assert cfg.bgjobs_min_age_s == 30
+
+
+def test_probe_disabled_via_subtable_enabled_false(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[probes.ci]\nenabled = false\n')
+    cfg = load(str(p))
+    assert cfg.probes["ci"] is False
 
 
 def test_bgjobs_ignore_defaults_empty(tmp_path):
@@ -46,7 +62,7 @@ def test_bgjobs_ignore_defaults_empty(tmp_path):
 
 def test_bgjobs_ignore_loaded_from_subtable(tmp_path):
     p = tmp_path / "c.toml"
-    p.write_text('[probes.bgjobs]\nignore = ["vite", "webpack"]\n')
+    p.write_text('[probes.bgjobs]\nenabled = true\nignore = ["vite", "webpack"]\n')
     cfg = load(str(p))
     assert cfg.bgjobs_ignore == ["vite", "webpack"]
     assert cfg.probes["bgjobs"] is True

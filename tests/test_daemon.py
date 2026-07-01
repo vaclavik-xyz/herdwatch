@@ -250,4 +250,4 @@ def test_build_daemon_constructs():
         def pane_process_info(self, pid):
             return {}
     d = build_daemon(Config(), client=FakeC())
-    assert len(d._probes) == 4  # all four probes enabled by default
+    assert len(d._probes) == 3  # roborev, ci, marker on by default (bgjobs opt-in)
