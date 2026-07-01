@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.herdwatch.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/admin/projects/herdwatch/.venv/bin/herdwatch</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/Users/admin/.local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/tmp/herdwatch.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/herdwatch.err.log</string>
+</dict>
+</plist>
