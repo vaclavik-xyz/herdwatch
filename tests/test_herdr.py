@@ -40,3 +40,19 @@ def test_pane_process_info_handles_result_null():
     import json
     payload = json.dumps({"result": None})
     assert HerdrClient(run=lambda a: (0, payload)).pane_process_info("w1:p1") == {}
+
+def test_agent_explain_returns_detected_state():
+    payload = json.dumps({"agent": "claude", "state": "working", "evaluated_rules": []})
+    calls = []
+    client = HerdrClient(run=lambda args: calls.append(args) or (0, payload))
+    assert client.agent_explain("w1:p1") == "working"
+    assert calls[0] == ["herdr", "agent", "explain", "w1:p1", "--json"]
+
+
+def test_agent_explain_none_on_error():
+    assert HerdrClient(run=lambda a: (1, "")).agent_explain("w1:p1") is None
+
+
+def test_agent_explain_none_on_missing_or_non_string_state():
+    assert HerdrClient(run=lambda a: (0, json.dumps({"agent": "claude"}))).agent_explain("w1:p1") is None
+    assert HerdrClient(run=lambda a: (0, json.dumps({"state": 5}))).agent_explain("w1:p1") is None

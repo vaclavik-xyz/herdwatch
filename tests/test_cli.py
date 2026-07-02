@@ -39,6 +39,20 @@ def test_status_no_state(tmp_path, monkeypatch, capsys):
     assert "no state" in capsys.readouterr().out
 
 
+def test_status_labels_progress_and_hold_panes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path / "markers"))
+    _seed_snapshot(tmp_path, monkeypatch, [
+        {"pane_id": "w1:p1", "agent": "claude", "status": "2/5 Fixing auth",
+         "kind": "progress"},
+        {"pane_id": "w2:p2", "agent": "claude", "status": "⏳ review",
+         "kind": "hold"},
+    ])
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "working w1:p1  2/5 Fixing auth  (claude)" in out
+    assert "holding w2:p2  ⏳ review  (claude)" in out
+
+
 def test_status_lists_markers_and_panes(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path / "markers"))
     MarkerStore(tmp_path / "markers").add("w9:p9", "deploy")

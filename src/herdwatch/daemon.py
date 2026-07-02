@@ -20,6 +20,7 @@ from .probes.bgjobs import BgJobsProbe
 from .probes.ci import CIProbe
 from .probes.marker import MarkerProbe
 from .probes.roborev import RoborevProbe
+from .progress import progress_label
 from .state import StateStore
 
 SOURCE = "herdwatch"
@@ -31,6 +32,7 @@ log = logging.getLogger(__name__)
 class ManagedPane:
     custom_status: str
     agent: str
+    kind: str = "hold"  # "hold" = ⏳ wait assertion, "progress" = task-list label
 
 
 class Daemon:
@@ -39,7 +41,8 @@ class Daemon:
                  enrich: Callable[[str], gitctx.GitInfo] = gitctx.enrich,
                  allow: list[str] | None = None,
                  deny: list[str] | None = None,
-                 on_snapshot: Callable[[list[dict]], None] = lambda rows: None) -> None:
+                 on_snapshot: Callable[[list[dict]], None] = lambda rows: None,
+                 progress: Callable[[str], str | None] | None = None) -> None:
         self._client = client
         self._probes = probes
         self._reprobe = reprobe_interval_s
@@ -48,6 +51,7 @@ class Daemon:
         self._allow = set(allow or [])
         self._deny = set(deny or [])
         self._on_snapshot = on_snapshot
+        self._progress = progress
         self.managed: dict[str, ManagedPane] = {}
         self._last_probe: dict[str, float] = {}
         # panes recovered from a prior run: force one re-assert to herdr on the
@@ -55,7 +59,8 @@ class Daemon:
         self._adopted: set[str] = set()
 
     def _rows(self) -> list[dict]:
-        return [{"pane_id": pid, "agent": mp.agent, "status": mp.custom_status}
+        return [{"pane_id": pid, "agent": mp.agent, "status": mp.custom_status,
+                 "kind": mp.kind}
                 for pid, mp in sorted(self.managed.items())]
 
     def adopt(self, rows: list[dict]) -> None:
@@ -67,7 +72,8 @@ class Daemon:
             pane_id = row.get("pane_id")
             if pane_id:
                 self.managed[pane_id] = ManagedPane(row.get("status", ""),
-                                                    row.get("agent", "agent"))
+                                                    row.get("agent", "agent"),
+                                                    kind=row.get("kind", "hold"))
                 self._adopted.add(pane_id)
 
     def _publish(self) -> None:
@@ -113,6 +119,46 @@ class Daemon:
             worktree_heads=gi.worktree_heads,
         )
 
+    def _progress_tick(self, pane_id: str, agent: dict,
+                       mp: ManagedPane | None, status: str) -> str | None:
+        """Working-pane progress path. Returns the pane's true status when the
+        idle/hold flow should continue with it, or None when the pane was
+        handled here (it is genuinely working)."""
+        if mp is not None:
+            # our own assertion masks agent_status; screen detection does not
+            status = self._client.agent_explain(pane_id) or "idle"
+        if status != "working":
+            if mp is not None:
+                self._release(pane_id, "agent stopped")
+                # a stale timer from an idle probe that predates the progress
+                # assertion must not throttle the same-tick hold takeover below
+                self._last_probe.pop(pane_id, None)
+            return status
+        label = None
+        if self._progress is not None and (agent.get("agent") or "") == "claude":
+            session = (agent.get("agent_session") or {}).get("value")
+            if session:
+                try:
+                    label = self._progress(session)
+                except Exception:
+                    log.warning("progress read failed; skipping", exc_info=True)
+        if label:
+            agent_name = agent.get("agent") or "agent"
+            if (mp is not None and mp.custom_status == label
+                    and pane_id not in self._adopted):
+                pass  # already asserting this exact label
+            elif self._client.report_agent(pane_id, SOURCE, agent_name, "working", label):
+                self.managed[pane_id] = ManagedPane(label, agent_name, kind="progress")
+                self._adopted.discard(pane_id)
+                log.info("progress %s -> %s (%s)", pane_id, label, agent_name)
+        elif mp is not None:
+            self._release(pane_id, "no active task")
+        if pane_id not in self.managed:
+            # busy and unheld: forget the timer so a fresh idle edge probes
+            # immediately (preserves the pre-progress behaviour)
+            self._last_probe.pop(pane_id, None)
+        return None
+
     def tick(self) -> None:
         seen = set()
         for agent in self._client.agent_list():
@@ -121,6 +167,12 @@ class Daemon:
                 continue
             seen.add(pane_id)
             status = agent.get("agent_status") or "unknown"
+            mp = self.managed.get(pane_id)
+            if mp is None or mp.kind == "progress":
+                fallthrough = self._progress_tick(pane_id, agent, mp, status)
+                if fallthrough is None:
+                    continue
+                status = fallthrough
             managed = pane_id in self.managed
             if not managed and status not in ("idle", "done"):
                 # not ours and busy: forget its timer so a fresh idle edge
@@ -217,4 +269,5 @@ def build_daemon(config: Config, client=None) -> Daemon:
                                   extra_ignore=config.bgjobs_ignore))
     return Daemon(client, probes, reprobe_interval_s=config.reprobe_interval_s,
                   allow=config.allow, deny=config.deny,
-                  on_snapshot=StateStore().write)
+                  on_snapshot=StateStore().write,
+                  progress=progress_label if config.progress_enabled else None)

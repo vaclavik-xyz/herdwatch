@@ -44,6 +44,22 @@ behind. On startup the daemon reads that file back and re-adopts those panes, so
 a crash-and-restart reconciles them (next tick re-probes → re-asserts or
 releases) instead of orphaning a `working ⏳`.
 
+## Task progress in the sidebar
+
+While a Claude Code agent is actively working through a task list, herdwatch
+shows how far along it is — `3/7 Fixing auth bug` — as the pane's status
+label. It reads the session's task files (`~/.claude/tasks/`, matched via
+herdr's `agent_session` id), so no per-agent setup is needed; other agents
+are skipped. Because herdwatch asserts the label over herdr's own detection,
+it re-checks the pane each tick with `herdr agent explain` (live screen
+detection) and drops the label the moment the agent actually stops — a pane
+waiting for your input is never masked. Disable with:
+
+```toml
+[progress]
+enabled = false
+```
+
 ## Install & run
 
 **From source (recommended for now):**
@@ -107,6 +123,9 @@ enabled = true              # opt in to background-job detection
 min_age_s = 5               # ignore just-spawned processes
 ignore = ["vite", "webpack"]  # extra process names to treat as "not a job"
                               # (added on top of the built-in defaults)
+
+[progress]
+enabled = true               # default
 
 [panes]
 allow = []                  # if non-empty, only manage these pane ids

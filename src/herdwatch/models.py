@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# shared cap for pane labels reported to herdr (custom_status)
+LABEL_MAX_LEN = 32
+
 
 @dataclass(frozen=True)
 class Pending:
