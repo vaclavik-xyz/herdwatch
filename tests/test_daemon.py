@@ -416,10 +416,12 @@ def test_progress_released_when_explain_fails():
 def test_progress_released_when_blocked():
     # agent is waiting on the user (not stopped, not idle) -- must be released,
     # not re-asserted or masked with a hold; idle/hold probes only run for
-    # idle/done panes, so no hold ever gets asserted over a blocked pane.
+    # idle/done panes, so no hold ever gets asserted over a blocked pane even
+    # when a probe has a pending reason ready to hand it a hold label.
     client = FakeClient([_claude_agent()], explain="working")
-    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
-               progress=lambda sid: "2/5 Fixing auth")
+    probe = StaticProbe(Pending("CI: ci", 20, "ci"))
+    d = Daemon(client, [probe], reprobe_interval_s=0, clock=lambda: 0.0,
+               enrich=_ENRICH, progress=lambda sid: "2/5 Fixing auth")
     d.tick()
     client.explain = "blocked"
     d.tick()
