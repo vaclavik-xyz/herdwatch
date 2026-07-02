@@ -76,7 +76,8 @@ def _cmd_status(args) -> int:
                   "panes below may be stale — check `herdwatch doctor`")
         if snap.panes:
             for p in snap.panes:
-                print(f"holding {p['pane_id']}  {p['status']}  ({p['agent']})")
+                verb = "working" if p.get("kind") == "progress" else "holding"
+                print(f"{verb} {p['pane_id']}  {p['status']}  ({p['agent']})")
         else:
             print("holding no panes")
     for m in _store().all():
