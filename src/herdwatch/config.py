@@ -21,6 +21,7 @@ class Config:
     ci_cache_ttl_s: float = 10.0
     bgjobs_min_age_s: float = 5.0
     bgjobs_ignore: list[str] = field(default_factory=list)
+    progress_enabled: bool = True
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
 
@@ -51,6 +52,9 @@ def load(path: str | None = None) -> Config:
     if isinstance(bg, dict):
         cfg.bgjobs_min_age_s = float(bg.get("min_age_s", cfg.bgjobs_min_age_s))
         cfg.bgjobs_ignore = list(bg.get("ignore", cfg.bgjobs_ignore))
+    prog = data.get("progress", {})
+    if isinstance(prog, dict) and isinstance(prog.get("enabled"), bool):
+        cfg.progress_enabled = prog["enabled"]
     panes = data.get("panes", {})
     cfg.allow = list(panes.get("allow", []))
     cfg.deny = list(panes.get("deny", []))
