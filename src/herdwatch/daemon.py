@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 class ManagedPane:
     custom_status: str
     agent: str
+    kind: str = "hold"  # "hold" = ⏳ wait assertion, "progress" = task-list label
 
 
 class Daemon:
@@ -55,7 +56,8 @@ class Daemon:
         self._adopted: set[str] = set()
 
     def _rows(self) -> list[dict]:
-        return [{"pane_id": pid, "agent": mp.agent, "status": mp.custom_status}
+        return [{"pane_id": pid, "agent": mp.agent, "status": mp.custom_status,
+                 "kind": mp.kind}
                 for pid, mp in sorted(self.managed.items())]
 
     def adopt(self, rows: list[dict]) -> None:
@@ -67,7 +69,8 @@ class Daemon:
             pane_id = row.get("pane_id")
             if pane_id:
                 self.managed[pane_id] = ManagedPane(row.get("status", ""),
-                                                    row.get("agent", "agent"))
+                                                    row.get("agent", "agent"),
+                                                    kind=row.get("kind", "hold"))
                 self._adopted.add(pane_id)
 
     def _publish(self) -> None:

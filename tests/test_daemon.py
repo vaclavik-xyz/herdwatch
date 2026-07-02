@@ -230,7 +230,7 @@ def test_tick_snapshots_managed_rows():
     d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
                clock=lambda: 0.0, enrich=_ENRICH, on_snapshot=snaps.append)
     d.tick()
-    assert snaps[-1] == [{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}]
+    assert snaps[-1] == [{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review", "kind": "hold"}]
 
 def test_tick_snapshots_empty_when_nothing_held():
     client = FakeClient([_agent(status="idle")])
@@ -270,6 +270,19 @@ def test_adopt_ignores_rows_without_pane_id():
     d = Daemon(FakeClient([]), [], clock=lambda: 0.0, enrich=_ENRICH)
     d.adopt([{"agent": "claude", "status": "⏳ x"}, {"pane_id": "", "agent": "c"}])
     assert d.managed == {}
+
+
+def test_adopt_defaults_kind_to_hold():
+    d = Daemon(FakeClient([]), [], clock=lambda: 0.0, enrich=_ENRICH)
+    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    assert d.managed["w1:p1"].kind == "hold"
+
+
+def test_adopt_preserves_progress_kind():
+    d = Daemon(FakeClient([]), [], clock=lambda: 0.0, enrich=_ENRICH)
+    d.adopt([{"pane_id": "w1:p1", "agent": "claude",
+              "status": "2/5 Fixing auth", "kind": "progress"}])
+    assert d.managed["w1:p1"].kind == "progress"
 
 def test_adopted_pane_released_when_work_already_cleared():
     # a pane we held before a crash, whose background work finished while we were
