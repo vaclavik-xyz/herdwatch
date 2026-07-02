@@ -130,6 +130,9 @@ class Daemon:
         if status != "working":
             if mp is not None:
                 self._release(pane_id, "agent stopped")
+                # a stale timer from an idle probe that predates the progress
+                # assertion must not throttle the same-tick hold takeover below
+                self._last_probe.pop(pane_id, None)
             return status
         label = None
         if self._progress is not None and (agent.get("agent") or "") == "claude":

@@ -439,6 +439,33 @@ def test_progress_reader_exception_is_contained():
     assert client.reports == []
 
 
+def test_progress_stop_falls_through_despite_stale_reprobe_timer():
+    # a stale _last_probe timestamp left over from an idle probe *before*
+    # progress even started must not throttle the hold flow once progress
+    # releases -- the handover has to happen in the same tick, not deferred
+    # until the old reprobe window expires.
+    now = [0.0]
+    client = FakeClient([_agent(status="idle")])
+    probe = StaticProbe(None)
+    d = Daemon(client, [probe], reprobe_interval_s=15, clock=lambda: now[0],
+               enrich=_ENRICH, progress=lambda sid: "2/5 Fixing auth")
+    d.tick()  # idle probe: nothing pending, last_probe recorded at t=0
+
+    now[0] = 2.0
+    client.agents = [_claude_agent()]
+    client.explain = "working"
+    d.tick()  # pane starts working: progress asserted
+
+    now[0] = 5.0  # well within the 15s reprobe window opened at t=0
+    client.explain = "idle"  # detection says the agent stopped
+    probe.result = Pending("CI: ci", 20, "ci")
+    d.tick()
+
+    assert client.releases == ["w1:p1"]
+    assert client.reports[-1] == ("w1:p1", "working", "⏳ CI: ci")
+    assert d.managed["w1:p1"].kind == "hold"
+
+
 def test_hold_pane_not_probed_by_progress_path():
     # an idle pane held for CI must stay a hold even if its session has an
     # in_progress task (holds own the pane until their work clears)
