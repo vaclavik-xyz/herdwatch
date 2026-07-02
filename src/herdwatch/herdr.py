@@ -36,6 +36,15 @@ class HerdrClient:
         data = self._json([self._bin, "pane", "process-info", "--pane", pane_id])
         return (data.get("result") or {}).get("process_info", {})
 
+    def agent_explain(self, pane_id: str) -> str | None:
+        """Live screen-detected agent state, independent of reported
+        sessions — the way to see the real state under our own assertion.
+        `agent explain --json` prints a top-level object, not {"result":...}.
+        """
+        data = self._json([self._bin, "agent", "explain", pane_id, "--json"])
+        state = data.get("state")
+        return state if isinstance(state, str) else None
+
     def report_agent(self, pane_id: str, source: str, agent: str, state: str,
                      custom_status: str | None = None) -> bool:
         args = [self._bin, "pane", "report-agent", pane_id, "--source", source,
