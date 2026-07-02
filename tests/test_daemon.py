@@ -413,6 +413,21 @@ def test_progress_released_when_explain_fails():
     assert client.releases == ["w1:p1"]
 
 
+def test_progress_released_when_blocked():
+    # agent is waiting on the user (not stopped, not idle) -- must be released,
+    # not re-asserted or masked with a hold; idle/hold probes only run for
+    # idle/done panes, so no hold ever gets asserted over a blocked pane.
+    client = FakeClient([_claude_agent()], explain="working")
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: "2/5 Fixing auth")
+    d.tick()
+    client.explain = "blocked"
+    d.tick()
+    assert client.releases == ["w1:p1"]
+    assert "w1:p1" not in d.managed
+    assert len(client.reports) == 1  # no hold asserted over the released pane
+
+
 def test_progress_skips_non_claude_agents():
     agent = {"pane_id": "w1:p1", "agent_status": "working", "agent": "codex",
              "cwd": "/x", "agent_session": {"value": "abc"}}
