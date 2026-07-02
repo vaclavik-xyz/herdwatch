@@ -38,8 +38,12 @@ def _agent(pane="w1:p1", status="idle"):
 
 
 def _claude_agent(pane="w1:p1", status="working", session="c00b128f-68c8-4643-82d6-2835c317517d"):
-    return {"pane_id": pane, "agent_status": status, "agent": "claude", "cwd": "/x",
-            "agent_session": {"value": session}}
+    a = {"pane_id": pane, "agent_status": status, "agent": "claude", "cwd": "/x"}
+    if session is not None:
+        # herdr exposes agent_session only for idle/done panes, not working ones;
+        # pass session=None to mimic a working pane herdr reports without it
+        a["agent_session"] = {"value": session}
+    return a
 
 def test_context_carries_worktree_heads_to_probes():
     heads = (WorktreeHead(head_sha="sha", branch="main"),
@@ -428,6 +432,40 @@ def test_progress_released_when_blocked():
     assert client.releases == ["w1:p1"]
     assert "w1:p1" not in d.managed
     assert len(client.reports) == 1  # no hold asserted over the released pane
+
+
+def test_progress_uses_cached_session_when_working_omits_it():
+    # herdr drops agent_session for working panes, so the label can only be
+    # resolved from a session cached on an earlier idle/done tick
+    client = FakeClient([_claude_agent(status="idle")], explain="working")
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: f"2/5 {sid[:4]}")
+    d.tick()  # idle tick caches the session; no label while idle
+    assert client.reports == []
+    client.agents = [_claude_agent(status="working", session=None)]
+    d.tick()  # working pane has no session of its own -> cached one is used
+    assert client.reports == [("w1:p1", "working", "2/5 c00b")]
+
+
+def test_progress_skipped_when_session_never_seen():
+    # a pane already working when the daemon started, never seen idle, has no
+    # cached session and herdr won't provide one -> no label (cold-start gap)
+    client = FakeClient([_claude_agent(status="working", session=None)])
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: "2/5 x")
+    d.tick()
+    assert client.reports == []
+
+
+def test_session_cache_dropped_when_pane_vanishes():
+    client = FakeClient([_claude_agent(status="idle")])
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: "2/5 x")
+    d.tick()
+    assert d._session_cache.get("w1:p1")
+    client.agents = []
+    d.tick()
+    assert "w1:p1" not in d._session_cache
 
 
 def test_progress_skips_non_claude_agents():
