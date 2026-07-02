@@ -62,8 +62,9 @@ progress display.
 
 `format_label(p: Progress) -> str`
 
-- `f"{min(p.done + 1, p.total)}/{p.total} {p.active}"`, truncated to 48
-  characters with an ellipsis.
+- `f"{min(p.done + 1, p.total)}/{p.total} {p.active}"`, truncated to the
+  existing 32-character label limit (`aggregate.MAX_LEN`, moved to a shared
+  constant) with an ellipsis.
 
 ### Daemon integration
 
@@ -113,8 +114,8 @@ enabled = true      # default on; set false to disable the feature
 ```
 
 Progress respects the existing `[panes] allow` / `deny` lists. No other
-tuning knobs in v1 (label length and the total >= 2 threshold are
-constants).
+tuning knobs in v1 (label length — the shared 32-char limit — and the
+total >= 2 threshold are constants).
 
 ## Edge cases
 
