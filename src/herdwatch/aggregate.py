@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from .models import Pending
+from .models import LABEL_MAX_LEN as MAX_LEN, Pending
 
 HOURGLASS = "⏳"  # ⏳
-MAX_LEN = 32
 
 
 def aggregate(pendings: list[Pending]) -> str | None:
