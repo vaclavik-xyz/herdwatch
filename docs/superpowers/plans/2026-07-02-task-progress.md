@@ -6,7 +6,7 @@
 
 **Architecture:** The daemon gains a "progress" path alongside the existing ⏳ "hold" path. For working claude panes it reads the session's task files from `~/.claude/tasks/session-<uuid[:8]>/` and asserts `working` + label via `herdr pane report-agent`. Because that assertion masks herdr's own detection, panes we decorate are re-checked each tick with `herdr agent explain --json` (live screen detection); when detection says the agent stopped, the label is released and the existing idle/hold flow takes over in the same tick.
 
-**Tech Stack:** Python 3.12+ stdlib only (same as the rest of herdwatch), pytest.
+**Tech Stack:** Python 3.11+ stdlib only (matches `requires-python = ">=3.11"`), pytest.
 
 **Spec:** `docs/superpowers/specs/2026-07-02-task-progress-design.md`
 
