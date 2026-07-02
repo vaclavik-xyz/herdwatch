@@ -100,9 +100,10 @@ decorated pane is cheap, and progress should update at poll cadence (~4 s).
 
 ### Session resolution
 
-`agent list` entries carry `agent_session.value`. The daemon passes it into
-`PaneContext` as a new optional field `session_id: str | None` (None when
-absent). Only entries with `agent == "claude"` are considered for progress.
+`agent list` entries carry `agent_session.value`. The daemon reads it
+directly from the agent-list entry in the progress path (`PaneContext` is
+only built for the idle probe flow, which has no use for it — YAGNI). Only
+entries with `agent == "claude"` are considered for progress.
 
 ## Config
 

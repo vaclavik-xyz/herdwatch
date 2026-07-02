@@ -4,14 +4,19 @@ from herdwatch.gitctx import GitInfo
 from herdwatch.models import Pending, WorktreeHead
 
 class FakeClient:
-    def __init__(self, agents, report_ok=True, release_ok=True):
+    def __init__(self, agents, report_ok=True, release_ok=True, explain="idle"):
         self.agents = agents
         self.reports = []
         self.releases = []
+        self.explains = []
         self._report_ok = report_ok
         self._release_ok = release_ok
+        self.explain = explain  # state returned by agent_explain, or None
     def agent_list(self):
         return self.agents
+    def agent_explain(self, pane_id):
+        self.explains.append(pane_id)
+        return self.explain
     def report_agent(self, pane_id, source, agent, state, custom_status=None):
         self.reports.append((pane_id, state, custom_status))
         return self._report_ok
@@ -30,6 +35,11 @@ _ENRICH = lambda cwd: GitInfo(True, "sha", "main", True)
 
 def _agent(pane="w1:p1", status="idle"):
     return {"pane_id": pane, "agent_status": status, "agent": "claude", "cwd": "/x"}
+
+
+def _claude_agent(pane="w1:p1", status="working", session="c00b128f-68c8-4643-82d6-2835c317517d"):
+    return {"pane_id": pane, "agent_status": status, "agent": "claude", "cwd": "/x",
+            "agent_session": {"value": session}}
 
 def test_context_carries_worktree_heads_to_probes():
     heads = (WorktreeHead(head_sha="sha", branch="main"),
@@ -332,3 +342,111 @@ def test_build_daemon_constructs():
             return {}
     d = build_daemon(Config(), client=FakeC())
     assert len(d._probes) == 3  # roborev, ci, marker on by default (bgjobs opt-in)
+
+
+def test_progress_asserts_label_for_working_claude_pane():
+    client = FakeClient([_claude_agent()])
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: "2/5 Fixing auth")
+    d.tick()
+    assert client.reports == [("w1:p1", "working", "2/5 Fixing auth")]
+    assert d.managed["w1:p1"].kind == "progress"
+    assert client.explains == []  # unmanaged pane: agent_status is the truth
+
+
+def test_progress_reasserts_only_on_label_change():
+    client = FakeClient([_claude_agent()], explain="working")
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: "2/5 Fixing auth")
+    d.tick()
+    d.tick()
+    assert len(client.reports) == 1
+    labels = iter(["3/5 Writing tests"])
+    d._progress = lambda sid: next(labels)
+    d.tick()
+    assert client.reports[-1] == ("w1:p1", "working", "3/5 Writing tests")
+
+
+def test_progress_released_when_detection_says_stopped():
+    client = FakeClient([_claude_agent()], explain="working")
+    d = Daemon(client, [], reprobe_interval_s=0, clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: "2/5 Fixing auth")
+    d.tick()
+    client.explain = "idle"
+    d.tick()
+    assert client.releases == ["w1:p1"]
+    assert "w1:p1" not in d.managed
+
+
+def test_progress_hands_over_to_hold_in_same_tick():
+    # agent stops with CI still running: release progress, assert ⏳ hold now
+    client = FakeClient([_claude_agent()], explain="working")
+    probe = StaticProbe(None)
+    d = Daemon(client, [probe], reprobe_interval_s=0, clock=lambda: 0.0,
+               enrich=_ENRICH, progress=lambda sid: "2/5 Fixing auth")
+    d.tick()
+    client.explain = "idle"
+    probe.result = Pending("CI: ci", 20, "ci")
+    d.tick()
+    assert client.releases == ["w1:p1"]
+    assert client.reports[-1] == ("w1:p1", "working", "⏳ CI: ci")
+    assert d.managed["w1:p1"].kind == "hold"
+
+
+def test_progress_released_when_no_active_task():
+    client = FakeClient([_claude_agent()], explain="working")
+    labels = iter(["2/5 Fixing auth", None])
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: next(labels))
+    d.tick()
+    d.tick()
+    assert client.releases == ["w1:p1"]
+
+
+def test_progress_released_when_explain_fails():
+    client = FakeClient([_claude_agent()], explain="working")
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: "2/5 Fixing auth")
+    d.tick()
+    client.explain = None  # herdr hiccup: prefer releasing over masking
+    d.tick()
+    assert client.releases == ["w1:p1"]
+
+
+def test_progress_skips_non_claude_agents():
+    agent = {"pane_id": "w1:p1", "agent_status": "working", "agent": "codex",
+             "cwd": "/x", "agent_session": {"value": "abc"}}
+    client = FakeClient([agent])
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH,
+               progress=lambda sid: "2/5 X")
+    d.tick()
+    assert client.reports == []
+
+
+def test_progress_disabled_leaves_working_panes_alone():
+    client = FakeClient([_claude_agent()])
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH, progress=None)
+    d.tick()
+    assert client.reports == []
+
+
+def test_progress_reader_exception_is_contained():
+    def boom(sid):
+        raise RuntimeError("bad file")
+    client = FakeClient([_claude_agent()])
+    d = Daemon(client, [], clock=lambda: 0.0, enrich=_ENRICH, progress=boom)
+    d.tick()  # must not raise
+    assert client.reports == []
+
+
+def test_hold_pane_not_probed_by_progress_path():
+    # an idle pane held for CI must stay a hold even if its session has an
+    # in_progress task (holds own the pane until their work clears)
+    client = FakeClient([_claude_agent(status="idle")], explain="idle")
+    probe = StaticProbe(Pending("CI: ci", 20, "ci"))
+    d = Daemon(client, [probe], reprobe_interval_s=0, clock=lambda: 0.0,
+               enrich=_ENRICH, progress=lambda sid: "2/5 X")
+    d.tick()
+    d.tick()
+    assert d.managed["w1:p1"].kind == "hold"
+    assert all(s == "⏳ CI: ci" for (_, _, s) in client.reports)
