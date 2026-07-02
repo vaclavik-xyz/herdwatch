@@ -54,6 +54,12 @@ class Daemon:
         self._progress = progress
         self.managed: dict[str, ManagedPane] = {}
         self._last_probe: dict[str, float] = {}
+        # herdr reports agent_session only for idle/done panes, never while a
+        # pane is working -- exactly when the progress path needs it. Cache the
+        # session per pane from any tick that carries it and reuse it while the
+        # pane works. A pane already working at daemon start and never seen idle
+        # has no cached session, so it gets no progress label until it next idles.
+        self._session_cache: dict[str, str] = {}
         # panes recovered from a prior run: force one re-assert to herdr on the
         # first probe, since herdr may have lost the old assertion while we were down
         self._adopted: set[str] = set()
@@ -136,7 +142,8 @@ class Daemon:
             return status
         label = None
         if self._progress is not None and (agent.get("agent") or "") == "claude":
-            session = (agent.get("agent_session") or {}).get("value")
+            session = ((agent.get("agent_session") or {}).get("value")
+                       or self._session_cache.get(pane_id))
             if session:
                 try:
                     label = self._progress(session)
@@ -166,6 +173,9 @@ class Daemon:
             if not pane_id or not self._eligible(pane_id):
                 continue
             seen.add(pane_id)
+            sess = (agent.get("agent_session") or {}).get("value")
+            if sess:
+                self._session_cache[pane_id] = sess
             status = agent.get("agent_status") or "unknown"
             mp = self.managed.get(pane_id)
             if mp is None or mp.kind == "progress":
@@ -222,6 +232,9 @@ class Daemon:
         for pane_id in list(self._last_probe):
             if pane_id not in seen:
                 self._last_probe.pop(pane_id, None)
+        for pane_id in list(self._session_cache):
+            if pane_id not in seen:
+                self._session_cache.pop(pane_id, None)
         self._publish()
 
     def release_all(self) -> None:

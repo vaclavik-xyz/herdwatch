@@ -32,8 +32,13 @@ progress display.
    `~/.claude/tasks/session-<uuid[:8]>/<N>.json`, one file per task, with
    `subject`, `activeForm`, and `status` (`pending` / `in_progress` /
    `completed`). herdr's `agent list` exposes `agent_session.value` — the
-   full session UUID — so pane → task list resolution needs no cooperation
-   from the agent.
+   full session UUID — but **only for idle/done panes**; while a pane is
+   *working* herdr omits `agent_session` entirely (confirmed live). Since
+   progress must render precisely while the pane works, the daemon caches
+   each pane's session id from any tick that carries it (i.e. whenever the
+   pane is idle/done) and reuses the cached id while the pane works. A pane
+   already working at daemon start that is never seen idle has no cached
+   session, so it gets no label until it next idles (cold-start gap).
 2. `herdr pane report-metadata --custom-status` does NOT render in the
    sidebar (tested with `--applies-to-source`, `--agent`, `--state-label`
    variants). The only rendering path is `herdr pane report-agent
@@ -100,10 +105,15 @@ decorated pane is cheap, and progress should update at poll cadence (~4 s).
 
 ### Session resolution
 
-`agent list` entries carry `agent_session.value`. The daemon reads it
-directly from the agent-list entry in the progress path (`PaneContext` is
-only built for the idle probe flow, which has no use for it — YAGNI). Only
-entries with `agent == "claude"` are considered for progress.
+`agent list` entries carry `agent_session.value` only when the pane is
+idle/done. The daemon keeps a per-pane `_session_cache`: every tick, if the
+agent entry carries a session id, it is stored under the pane id; the
+progress path resolves the session as "the entry's own id, else the cached
+one", so a working pane (whose entry omits the session) still resolves via
+the value cached the last time it was idle. Cache entries are dropped when a
+pane vanishes from `agent list`. Only entries with `agent == "claude"` are
+considered for progress. (`PaneContext` is not involved — it is built only
+for the idle probe flow, which has no use for the session — YAGNI.)
 
 ## Config
 
@@ -128,9 +138,11 @@ total >= 2 threshold are constants).
 - **`agent explain` failure or warning**: treated as "not working" →
   release. A one-tick label flicker is preferred over masking a waiting
   pane.
-- **Daemon restart**: progress panes are adopted from the state file; the
-  next tick re-derives truth (explain + task list) and re-asserts or
-  releases, same as holds.
+- **Daemon restart / cold start**: the session cache is in-memory, so a
+  pane that is already working when the daemon starts (and never seen idle
+  since) has no cached session and gets no label until it next idles. Progress
+  panes adopted from the state file are re-derived on the next tick (explain
+  + task list) and re-asserted or released, same as holds.
 - **Clean shutdown**: `release_all` already releases every managed pane.
 - **Sub-poll-interval staleness**: the label lags reality by up to one
   poll interval (~4 s), same as every herdwatch signal.
