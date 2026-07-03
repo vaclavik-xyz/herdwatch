@@ -75,6 +75,31 @@ def test_ignores_working_pane_not_managed():
     d.tick()
     assert client.reports == []
 
+def test_does_not_hold_done_pane():
+    # a `done` pane is herdr's "finished but unseen" signal. herdwatch cannot
+    # re-assert `done` (report-agent rejects it), so holding it as working and
+    # later releasing would degrade it to `idle` -- making unseen work look
+    # already-seen. Leave `done` panes alone; hold only already-seen `idle` ones.
+    client = FakeClient([_agent(status="done")])
+    d = Daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+               clock=lambda: 0.0, enrich=_ENRICH)
+    d.tick()
+    assert client.reports == []
+    assert "w1:p1" not in d.managed
+
+def test_holds_idle_pane_after_it_was_done():
+    # once the user views a `done` pane it becomes `idle`; only then does
+    # herdwatch pick up a pending hold (⏳), so the ⏳ appears after the output
+    # has been seen -- never masking the `done`.
+    client = FakeClient([_agent(status="done")])
+    probe = StaticProbe(Pending("CI: ci", 20, "ci"))
+    d = Daemon(client, [probe], reprobe_interval_s=0, clock=lambda: 0.0, enrich=_ENRICH)
+    d.tick()
+    assert client.reports == []          # done: left alone
+    client.agents = [_agent(status="idle")]
+    d.tick()
+    assert client.reports == [("w1:p1", "working", "⏳ CI: ci")]  # idle: now held
+
 def test_releases_when_cleared():
     client = FakeClient([_agent(status="idle")])
     probe = StaticProbe(Pending("review", 30, "roborev"))

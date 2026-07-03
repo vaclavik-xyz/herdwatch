@@ -23,10 +23,20 @@ and releases it the moment the work clears.
 
 herdwatch is a standalone background daemon — **not** a herdr fork and not a
 screen-scraper. It talks to herdr over its socket/CLI (herdr's documented plugin
-API surface), polls `herdr agent list`, and for panes that went idle/done runs a
+API surface), polls `herdr agent list`, and for panes that went **idle** runs a
 set of probes. While any probe is pending it asserts `working` + a `⏳` label via
 `herdr pane report-agent`; when they clear it releases the pane. No changes to
 herdr, no per-agent setup, and it works for any agent herdr tracks.
+
+It deliberately does **not** hold a pane herdr reports as `done` — herdr's
+"finished, but you haven't looked yet" state. herdwatch cannot re-assert `done`
+(herdr's `report-agent` only accepts `idle`/`working`/`blocked`/`unknown`), so
+overriding a `done` pane to `working` and later releasing it would degrade it to
+`idle`, making unseen work look already-seen. So a freshly finished pane keeps
+its `done` flag; once you view it (herdr → `idle`) herdwatch picks up any pending
+`⏳` hold. The trade-off: in the short window before you look, a `done` pane with
+CI/review still running shows `done` without the `⏳` — but `done` already means
+"go look", and the `⏳` appears the moment you do.
 
 **The key trick** (reusable for any similar tool): a state reported through
 `herdr pane report-agent --source <name>` is *authoritative and durable over
