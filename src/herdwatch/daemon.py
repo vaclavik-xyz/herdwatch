@@ -184,9 +184,14 @@ class Daemon:
                     continue
                 status = fallthrough
             managed = pane_id in self.managed
-            if not managed and status not in ("idle", "done"):
-                # not ours and busy: forget its timer so a fresh idle edge
-                # probes immediately
+            if not managed and status != "idle":
+                # Only start a hold on an already-seen `idle` pane. A `done`
+                # pane is herdr's "finished but unseen" signal; herdwatch cannot
+                # re-assert `done` (report-agent rejects it), so holding it as
+                # `working` and later releasing would degrade it to `idle` and
+                # make unseen work look already-seen. Leave `done` (and busy)
+                # panes alone; forget the timer so the next idle edge -- e.g.
+                # done->idle once the user views it -- probes immediately.
                 self._last_probe.pop(pane_id, None)
                 continue
             now = self._clock()
