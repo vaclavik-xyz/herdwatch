@@ -154,8 +154,13 @@ names to skip.
 ## v1 limitations
 
 - **Poll-based, not event-driven.** The daemon polls `herdr agent list` every
-  `poll_interval_s` (~4s). A pane can briefly show its own "done" before
-  herdwatch re-marks it working (a sub-poll-interval window).
+  `poll_interval_s` (~4s), so a hold appears up to one poll interval after a
+  pane goes idle.
+- **No `⏳` on unseen (`done`) panes.** herdwatch only holds already-seen
+  (`idle`) panes; a freshly finished pane keeps herdr's `done` flag and does
+  not get a `⏳` label until you view it and it becomes `idle` (see *How it
+  works*). So pending CI/review on a pane you haven't looked at yet is not
+  shown until you look — at which point the `⏳` appears.
 - **`status` is a snapshot, not a live query.** `herdwatch status` reads the
   state file the daemon writes each tick, so it lags reality by up to one
   `poll_interval_s`. If the daemon died uncleanly the file lingers, but `status`
