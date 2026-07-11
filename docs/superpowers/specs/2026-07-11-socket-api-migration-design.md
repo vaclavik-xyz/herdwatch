@@ -53,6 +53,15 @@ These shaped the design; implementers should not need to re-derive them:
   record) and deliberately no `pane.closed`/`pane.created` pair. Bulk
   closes (workspace/tab) may not emit per-pane `pane.closed`, hence the
   workspace/tab subscriptions above.
+- Pane records (`session.snapshot` agents, `agent.get`, `pane.moved`
+  payloads) carry **`terminal_id`** — a stable internal pane identity that
+  survives moves while the public `pane_id` changes. This is the
+  event-independent key for move reconciliation.
+- Envelope shapes: subscription events use dotted kinds
+  (`{"event": "pane.agent_status_changed", "data": {…}}`); generic
+  lifecycle events use snake_case kinds (`{"event": "pane_moved",
+  "data": {"type": "pane_moved", …}}`). Dispatch must accept both
+  spellings.
 - The subscription set of a connection is **fixed at subscribe time**; adding
   a pane means opening a replacement stream connection.
 - At subscribe time herdr probes each `agent_status_changed` pane
@@ -137,7 +146,9 @@ State:
 
 - `registry: dict[pane_id, AgentRecord]` — last known agent records, built
   from `session.snapshot`, status updated by `agent_status_changed` events.
-- `managed: dict[pane_id, ManagedPane]` — as today, `kind` gains a value:
+- `managed: dict[pane_id, ManagedPane]` — as today, plus each entry
+  records the pane's **`terminal_id`** (from the registry record at assert
+  time) for move reconciliation. `kind` gains a value:
   - `"hold"` — idle pane held `working` via `report_agent` (unchanged).
   - `"progress"` — working pane's task label, now via `report_metadata`.
   - `"done"` — done pane's ⏳ label via `report_metadata`.
@@ -156,10 +167,15 @@ Main loop (single thread):
    registry built from a pre-subscribe snapshot could go stale for up to a
    full resync. If B's pane set differs from A's, resubscribe with B and
    repeat. Adopt from the state file (same pid-liveness rule as today):
-   `"hold"` rows re-adopt as now; **non-`"hold"` rows get one best-effort
-   `release_agent` and are dropped** — they may come from a pre-migration
-   daemon whose progress labels were semantic `report_agent` assertions
-   with no TTL to clean them. Finish with one full sweep.
+   `"hold"` rows re-adopt as now; **non-`"hold"` rows go into a
+   legacy-release set retried each reprobe sweep until `release_agent`
+   confirms (success or `not_found`)** — they may come from a
+   pre-migration daemon whose progress labels were semantic
+   `report_agent` assertions with no TTL to clean them, so dropping them
+   on a single failed attempt (herdr briefly down) would orphan the
+   assertion forever. Entries in the set keep publishing to the state
+   file (original kind) so a crash mid-retry re-adopts them. Finish with
+   one full sweep.
 2. **Wait:** `selectors` on the stream fd, timeout = time to the nearest
    deadline (per-pane reprobe, resync).
 3. **`agent_status_changed` event:** update registry; run the same per-pane
@@ -179,15 +195,29 @@ Main loop (single thread):
    replacement `EventStream` and close the old one; drop stale
    `_last_probe`/`_session_cache` entries.
 
-   **Vanished panes:** when a *successful* snapshot lacks a managed pane,
-   herdr itself has dropped the pane (and any assertion on it) — make one
-   best-effort release/clear and **drop the bookkeeping regardless of the
-   outcome**; retrying against a nonexistent pane would leave a stale
-   managed entry forever. Retry-on-failed-release applies only to panes the
-   snapshot still contains. A release/clear that returns a structured
-   `not_found` error is likewise treated as cleared. If the snapshot
-   request itself failed (herdr down), keep all state and retry later — a
-   blip must not orphan or drop assertions.
+   **Vanished panes:** when a *successful* snapshot lacks a managed
+   pane_id, first try a **`terminal_id` remap**: if any record in the new
+   snapshot carries the managed entry's `terminal_id`, the pane was moved
+   (not closed) — remap the bookkeeping to the new pane_id exactly as the
+   `pane.moved` handler would. This makes move handling correct even when
+   the `pane.moved` event was lost (hub overflow, reconnect window, a
+   move racing the bootstrap's snapshot/subscribe/snapshot sequence);
+   the event handler is just the low-latency path, resync is the
+   backstop. Only when the `terminal_id` is gone too has herdr dropped
+   the pane (and any assertion on it) — then make one best-effort
+   release/clear and **drop the bookkeeping regardless of the outcome**;
+   retrying against a nonexistent pane would leave a stale managed entry
+   forever. Retry-on-failed-release applies only to panes the snapshot
+   still contains. A release/clear that returns a structured `not_found`
+   error is likewise treated as cleared. If the snapshot request itself
+   failed (herdr down), keep all state and retry later — a blip must not
+   orphan or drop assertions.
+
+   **Eligibility after a remap** (event- or resync-driven): the new
+   pane_id may be excluded by `allow`/`deny` while the assertion lives on
+   inside herdr. Re-evaluate eligibility after every remap; if the new id
+   is ineligible, release/clear it with the normal retry-until-confirmed
+   semantics instead of continuing to manage it.
 6. **Reprobe sweep:** at the unchanged 15 s cadence (per-pane throttle),
    probe **(a) every managed `"hold"` and `"done"` pane, (b) every
    unmanaged eligible `idle`/`done` registry pane, and (c) every managed
@@ -300,11 +330,13 @@ kinds stay in the state file so `herdwatch status` can show them.
   assertion) still reprobed and released when work clears, progress sweep
   never claims a `"hold"`/`"done"` pane, managed `"progress"` pane with a
   missed working→idle edge recovered by the reprobe sweep, `pane.moved`
-  remaps bookkeeping to the new pane id, bootstrap takes the registry
-  snapshot after the subscribe ack, legacy non-`"hold"` state-file rows
-  released once on adopt, vanished-pane bookkeeping drop vs herdr-down
-  retention, resubscribe on pane-set change, reconnect re-bootstrap,
-  old-server retry loop.
+  remaps bookkeeping to the new pane id, missed `pane.moved` recovered by
+  `terminal_id` remap at resync, remapped pane re-checked against
+  allow/deny (ineligible → released with retry), bootstrap takes the
+  registry snapshot after the subscribe ack, legacy non-`"hold"`
+  state-file rows retried until release confirms, vanished-pane
+  bookkeeping drop vs herdr-down retention, resubscribe on pane-set
+  change, reconnect re-bootstrap, old-server retry loop.
 - Live verification against the running herdr 0.7.3 before merge (verify
   skill): idle-edge latency, done-pane ⏳ visible, progress label without
   state masking, daemon restart reconciliation.
