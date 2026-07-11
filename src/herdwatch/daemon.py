@@ -1092,7 +1092,6 @@ class Daemon:
                                 )
                                 connected_at = None
                                 continue
-                            backoff = self._backoff_base
                             if self._stream is not stream:
                                 try:
                                     selector.unregister(stream)

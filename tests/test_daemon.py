@@ -2233,6 +2233,50 @@ def test_run_backs_off_when_streams_close_immediately():
     assert delays == [0.25, 0.5, 1.0]
 
 
+def test_startup_resync_does_not_reset_unproven_stream_backoff():
+    client = FakeClient([])
+    snapshot_calls = {"n": 0}
+    streams = []
+
+    def snapshot():
+        snapshot_calls["n"] += 1
+        if snapshot_calls["n"] <= 2:
+            raise HerdrUnavailable("down")
+        if snapshot_calls["n"] == 5:
+            streams[0]._w.close()
+        return {"agents": [_agent(status="working")]}
+
+    def factory(subs):
+        stream = FakeStream(subs)
+        streams.append(stream)
+        return stream
+
+    client.session_snapshot = snapshot
+    delays = []
+
+    def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 3:
+            raise SystemExit(0)
+
+    d = make_daemon(
+        client,
+        [StaticProbe(None)],
+        stream_factory=factory,
+        clock=time.monotonic,
+        backoff_base_s=0.25,
+        backoff_max_s=1.0,
+        startup_replay_quiet_s=0.001,
+        startup_replay_max_s=0.1,
+    )
+    try:
+        d.run(sleep=sleep)
+    except SystemExit:
+        pass
+
+    assert delays == [0.25, 0.5, 1.0]
+
+
 def test_run_resets_backoff_when_event_and_eof_arrive_together():
     client = FakeClient([])
     snapshot_calls = {"n": 0}
