@@ -45,12 +45,23 @@ These shaped the design; implementers should not need to re-derive them:
   `~/.config/herdr/herdr.sock`.
 - `pane.agent_status_changed` subscriptions are **per-pane** (`pane_id`
   required); there is no global variant. Global subscriptions used here:
-  `pane.created`, `pane.closed`, `pane.exited`, `pane.agent_detected`.
+  `pane.created`, `pane.closed`, `pane.exited`, `pane.agent_detected`,
+  `pane.moved`, `workspace.closed`, `tab.closed`.
+- A cross-workspace `pane.move` keeps the internal pane (and any agent
+  assertion on it) alive but assigns a **new public pane id**; herdr emits
+  `pane.moved` (payload carries `previous_pane_id` and the new `pane`
+  record) and deliberately no `pane.closed`/`pane.created` pair. Bulk
+  closes (workspace/tab) may not emit per-pane `pane.closed`, hence the
+  workspace/tab subscriptions above.
 - The subscription set of a connection is **fixed at subscribe time**; adding
   a pane means opening a replacement stream connection.
 - At subscribe time herdr probes each `agent_status_changed` pane
-  (`pane.get`) and replays events queued during the setup window — no gap
-  between a bootstrap snapshot and the stream, per pane.
+  (`pane.get`) to establish the change-detection **baseline** and replays
+  events queued during the subscription's own setup window. Transitions
+  that happen **before** subscribe (e.g. between a client's snapshot and
+  its subscribe call) are silently absorbed into that baseline and never
+  emitted — so a client must take its authoritative state snapshot
+  **after** the subscribe ack, not before (see Bootstrap).
 - Events are delivered by a server-side 100 ms poll loop; the event hub
   retains the last **512** events (a slow/stalled consumer can miss events —
   hence the resync timer).
@@ -78,9 +89,11 @@ These shaped the design; implementers should not need to re-derive them:
 4. Single-threaded sync loop over `selectors` — no asyncio, no threads, no
    new dependencies.
 5. **Events are triggers, snapshots are truth.** Only `agent_status_changed`
-   is handled incrementally (hot path). All lifecycle events (`pane.created`,
-   `pane.closed`, `pane.exited`, `pane.agent_detected`) merely schedule an
-   immediate resync + resubscribe. This avoids incremental-registry bugs.
+   (hot path) and `pane.moved` (bookkeeping remap — a resync would
+   misclassify the old id as vanished) are handled incrementally. All other
+   lifecycle events (`pane.created`, `pane.closed`, `pane.exited`,
+   `pane.agent_detected`, `workspace.closed`, `tab.closed`) merely schedule
+   an immediate resync + resubscribe. This avoids incremental-registry bugs.
 
 ## Architecture
 
@@ -135,17 +148,31 @@ State:
 
 Main loop (single thread):
 
-1. **Bootstrap:** `session.snapshot` → registry; adopt `"hold"` panes from
-   the state file (same pid-liveness rule as today); open `EventStream`
-   (4 global lifecycle subs + one `agent_status_changed` sub per registry
-   pane); run one full sweep.
+1. **Bootstrap:** `session.snapshot` (A) to learn the pane set; open
+   `EventStream` (global lifecycle subs + one `agent_status_changed` sub
+   per pane in A); then `session.snapshot` (B) **after** the subscribe ack
+   and build the registry from B — transitions before subscribe are
+   absorbed into herdr's per-pane baseline and never emitted, so a
+   registry built from a pre-subscribe snapshot could go stale for up to a
+   full resync. If B's pane set differs from A's, resubscribe with B and
+   repeat. Adopt from the state file (same pid-liveness rule as today):
+   `"hold"` rows re-adopt as now; **non-`"hold"` rows get one best-effort
+   `release_agent` and are dropped** — they may come from a pre-migration
+   daemon whose progress labels were semantic `report_agent` assertions
+   with no TTL to clean them. Finish with one full sweep.
 2. **Wait:** `selectors` on the stream fd, timeout = time to the nearest
    deadline (per-pane reprobe, resync).
 3. **`agent_status_changed` event:** update registry; run the same per-pane
    decision the old `tick()` made for that pane (progress path for working,
    hold path for idle, done path for done). A transition **into** `idle`
-   clears the pane's probe throttle so the probe runs immediately.
-4. **Lifecycle event:** schedule resync now.
+   **or `done`** clears the pane's probe throttle so the probe (or ⏳
+   metadata decision) runs immediately.
+4. **Lifecycle event:** `pane.moved` remaps `managed`, `_last_probe`,
+   `_session_cache`, and the registry entry from `previous_pane_id` to the
+   new `pane_id` in place (the assertion survives the move inside herdr, so
+   bookkeeping must follow it — releasing the old id would `not_found` and
+   orphan a permanent `working ⏳` under the new id) and marks the stream
+   for resubscribe. Every other lifecycle event just schedules resync now.
 5. **Resync (timer ~`resync_interval_s`, default 60 s, and after every
    reconnect/lifecycle event):** `session.snapshot`; reconcile vanished
    managed panes (below); replace registry; if the pane set changed, open a
@@ -162,8 +189,13 @@ Main loop (single thread):
    request itself failed (herdr down), keep all state and retry later — a
    blip must not orphan or drop assertions.
 6. **Reprobe sweep:** at the unchanged 15 s cadence (per-pane throttle),
-   probe **(a) every managed `"hold"` and `"done"` pane and (b) every
-   unmanaged eligible `idle`/`done` registry pane**. Both halves matter:
+   probe **(a) every managed `"hold"` and `"done"` pane, (b) every
+   unmanaged eligible `idle`/`done` registry pane, and (c) every managed
+   `"progress"` pane whose registry status is no longer `working`** —
+   (c) is the recovery path for a working→idle/done edge whose event was
+   missed (hub overflow, reconnect window): clear the metadata, drop the
+   `"progress"` entry, and run the normal idle/done flow. Halves (a) and
+   (b) both matter:
    a held pane reports `working` (our own authoritative assertion), so an
    idle/done status filter alone would never reprobe it and the hold would
    never release; and pending work can begin with no herdr event — a marker
@@ -176,9 +208,16 @@ Main loop (single thread):
    local session file changes, which produces **no herdr event** — so
    event-driven alone would never update them. A dedicated sweep (default
    4 s, `[progress] interval_s`) iterates registry panes with
-   `status == working` and `agent == claude`, re-derives the label (local
-   file read, no herdr request), and writes metadata only when the label
-   changed — plus a TTL refresh write when half the TTL has elapsed.
+   `status == working` and `agent == claude` **that are unmanaged or
+   already `kind == "progress"`** — never `"hold"`/`"done"` panes. This
+   preserves today's `mp is None or mp.kind == "progress"` guard
+   (`test_hold_pane_not_probed_by_progress_path`): a held pane reports
+   `working` from our own assertion and often still has an in-progress
+   task list, and letting the progress path claim it would overwrite the
+   `"hold"` bookkeeping and leak the semantic assertion forever. The sweep
+   re-derives the label (local file read, no herdr request) and writes
+   metadata only when the label changed — plus a TTL refresh write when
+   half the TTL has elapsed.
 
 **Self-echo guard:** our own `report_agent`/`report_metadata` writes come
 back as `agent_status_changed` presentation events. Events whose
@@ -258,9 +297,14 @@ kinds stay in the state file so `herdwatch status` can show them.
   TTL refresh + clamp boundaries, self-echo guard, progress sweep (label
   change with no herdr event), unmanaged idle/done pane picked up by the
   reprobe sweep (late marker), held pane (status `working` from our own
-  assertion) still reprobed and released when work clears, vanished-pane
-  bookkeeping drop vs herdr-down retention, resubscribe on pane-set change,
-  reconnect re-bootstrap, old-server retry loop.
+  assertion) still reprobed and released when work clears, progress sweep
+  never claims a `"hold"`/`"done"` pane, managed `"progress"` pane with a
+  missed working→idle edge recovered by the reprobe sweep, `pane.moved`
+  remaps bookkeeping to the new pane id, bootstrap takes the registry
+  snapshot after the subscribe ack, legacy non-`"hold"` state-file rows
+  released once on adopt, vanished-pane bookkeeping drop vs herdr-down
+  retention, resubscribe on pane-set change, reconnect re-bootstrap,
+  old-server retry loop.
 - Live verification against the running herdr 0.7.3 before merge (verify
   skill): idle-edge latency, done-pane ⏳ visible, progress label without
   state masking, daemon restart reconciliation.
