@@ -447,3 +447,62 @@ def test_event_stream_raises_unavailable_on_falsy_error_value(sock_dir):
             EventStream([{"type": "pane.created"}], socket_path=path, ack_timeout_s=5.0)
     finally:
         srv.close()
+
+
+def test_event_stream_caps_buffer_on_missing_newline(sock_dir):
+    """Regression: stream should close if buffer grows over max-response-size without newline."""
+    path = str(sock_dir / "oversized_stream.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def send_valid_then_oversized():
+        conn, _ = srv.accept()
+        # Read subscription request
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+        # Send subscription ACK
+        ack = {"id": "sub", "result": {"type": "subscription_started"}}
+        conn.sendall(json.dumps(ack).encode() + b"\n")
+
+        # Send one valid event line
+        valid_event = {"event": "pane.created", "data": {"id": "test"}}
+        conn.sendall(json.dumps(valid_event).encode() + b"\n")
+
+        # Now send oversized data without newline (>1MB)
+        try:
+            oversized = b"x" * (1024 * 1024 + 10000)
+            conn.sendall(oversized)
+            time.sleep(10)  # Keep connection open
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=send_valid_then_oversized, daemon=True)
+    t.start()
+    try:
+        stream = EventStream([{"type": "pane.created"}], socket_path=path)
+        try:
+            # Read the valid event
+            events = _wait_events(stream, want=1, timeout=2.0)
+            assert events == [{"event": "pane.created", "data": {"id": "test"}}]
+            assert not stream.closed
+
+            # Give the stream time to read and detect the oversized buffer
+            # The oversized data is 1MB+, so we need multiple read cycles
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not stream.closed:
+                stream.read_events()
+                time.sleep(0.001)  # Faster polling to catch the close quickly
+
+            # Assert that the stream detected the oversized buffer and closed
+            assert stream.closed
+        finally:
+            stream.close()
+    finally:
+        srv.close()

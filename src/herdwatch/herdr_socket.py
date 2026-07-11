@@ -178,6 +178,12 @@ class EventStream:
                     self.closed = True
                     break
                 self._buf += chunk
+                # Cap buffer growth: if buffer exceeds max size without a complete line,
+                # treat the stream as broken and close it (don't raise; just close cleanly)
+                if len(self._buf) > _MAX_RESPONSE_SIZE and b"\n" not in self._buf:
+                    self.closed = True
+                    self._buf = b""  # Drop the oversized garbage
+                    break
         events: list[dict] = []
         while b"\n" in self._buf:
             line, self._buf = self._buf.split(b"\n", 1)
