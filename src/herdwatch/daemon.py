@@ -55,6 +55,8 @@ MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
 TTL_MIN_MS = 1000
 TTL_MAX_MS = 86_400_000
 LIFECYCLE_RESYNC_DEBOUNCE_S = 0.25
+STARTUP_REPLAY_QUIET_S = 0.25
+STARTUP_REPLAY_MAX_S = 55.0
 SEMANTIC_HOLD_KINDS = {"hold", "hold-pending"}
 log = logging.getLogger(__name__)
 
@@ -86,6 +88,8 @@ class Daemon:
         stream_factory=None,
         backoff_base_s: float = 0.5,
         backoff_max_s: float = 30.0,
+        startup_replay_quiet_s: float = STARTUP_REPLAY_QUIET_S,
+        startup_replay_max_s: float = STARTUP_REPLAY_MAX_S,
     ) -> None:
         self._client = client
         self._probes = probes
@@ -101,6 +105,8 @@ class Daemon:
         self._stream_factory = stream_factory
         self._backoff_base = backoff_base_s
         self._backoff_max = backoff_max_s
+        self._startup_replay_quiet = startup_replay_quiet_s
+        self._startup_replay_max = startup_replay_max_s
         self.managed: dict[str, ManagedPane] = {}
         # Pre-migration semantic assertions awaiting release (see adopt).
         self._legacy_release: dict[str, ManagedPane] = {}
@@ -300,6 +306,42 @@ class Daemon:
             return
         self._last_boot_error = reason
         (log.error if error else log.warning)("bootstrap: %s", reason)
+
+    def _drain_startup_replay(
+        self, selector, stream
+    ) -> tuple[bool, int] | None:
+        """Drain retained subscription events before running slow probes.
+
+        Herdr 0.7.3 replays retained events to every new subscriber. Processing
+        those events individually is both stale and slow enough to fill the
+        socket while probes are running. Drain until the stream has been quiet,
+        then let one authoritative snapshot reconcile all startup changes.
+
+        Return ``(enabled, event_count)``, or ``None`` if the stream closed.
+        """
+        quiet_s = max(0.0, self._startup_replay_quiet)
+        max_s = max(0.0, self._startup_replay_max)
+        if quiet_s == 0.0 or max_s == 0.0:
+            return None if stream.closed else (False, 0)
+
+        started = self._clock()
+        stop_at = started + max_s
+        quiet_until = min(started + quiet_s, stop_at)
+        drained = 0
+        while True:
+            now = self._clock()
+            deadline = min(quiet_until, stop_at)
+            if now >= deadline:
+                return True, drained
+            ready = selector.select(max(0.0, deadline - now))
+            if not ready:
+                return True, drained
+            messages = stream.read_events()
+            if stream.closed:
+                return None
+            if messages:
+                drained += len(messages)
+                quiet_until = min(self._clock() + quiet_s, stop_at)
 
     # ---------- event dispatch ----------
 
@@ -518,7 +560,7 @@ class Daemon:
                         )
                     log.info("dropped vanished pane %s (%s)", pane_id, mp.kind)
 
-    def _resync(self) -> None:
+    def _resync(self) -> bool:
         """Snapshot is truth: reconcile managed/legacy/registry against it.
         Never raises; herdr being down keeps all state for a later retry."""
         self._resync_due = False
@@ -531,10 +573,10 @@ class Daemon:
                 "(server said: %s)",
                 exc,
             )
-            return
+            return False
         except HerdrUnavailable as exc:
             log.warning("resync skipped, herdr unreachable: %s", exc)
-            return
+            return False
         records = {
             a["pane_id"]: a
             for a in snap.get("agents", [])
@@ -566,6 +608,7 @@ class Daemon:
             self._stream.close()
             self._stream = None  # run loop re-bootstraps with the new pane set
         self._publish()
+        return True
 
     # ---------- assert / release primitives ----------
 
@@ -1009,11 +1052,56 @@ class Daemon:
                             pass
                         registered = None
                     if self.bootstrap():
-                        selector.register(self._stream, selectors.EVENT_READ)
-                        registered = self._stream
+                        stream = self._stream
+                        selector.register(stream, selectors.EVENT_READ)
+                        registered = stream
                         self._last_probe.clear()
                         self._resync_due = False
                         self._resync_not_before = None
+                        catchup = self._drain_startup_replay(selector, stream)
+                        if catchup is None:
+                            try:
+                                selector.unregister(stream)
+                            except (KeyError, ValueError):
+                                pass
+                            registered = None
+                            stream.close()
+                            if self._stream is stream:
+                                self._stream = None
+                            sleep(backoff)
+                            backoff = min(backoff * 2, self._backoff_max)
+                            continue
+                        catchup_enabled, drained = catchup
+                        if drained:
+                            log.info(
+                                "drained %d retained startup events", drained
+                            )
+                        if catchup_enabled:
+                            if not self._resync():
+                                try:
+                                    selector.unregister(stream)
+                                except (KeyError, ValueError):
+                                    pass
+                                registered = None
+                                stream.close()
+                                if self._stream is stream:
+                                    self._stream = None
+                                sleep(backoff)
+                                backoff = min(
+                                    backoff * 2, self._backoff_max
+                                )
+                                connected_at = None
+                                continue
+                            backoff = self._backoff_base
+                            if self._stream is not stream:
+                                try:
+                                    selector.unregister(stream)
+                                except (KeyError, ValueError):
+                                    pass
+                                registered = None
+                                stream.close()
+                                connected_at = None
+                                continue
                         self._reprobe_sweep()
                         self._progress_sweep()
                         now = self._clock()

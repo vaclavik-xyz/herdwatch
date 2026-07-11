@@ -1,5 +1,7 @@
 # tests/test_daemon.py
+import selectors
 import socket as _socket
+import time
 
 from herdwatch.daemon import Daemon, ManagedPane, SOURCE, TTL_MAX_MS, TTL_MIN_MS
 from herdwatch.gitctx import GitInfo
@@ -113,6 +115,7 @@ def _claude_agent(
 def make_daemon(client, probes=(), **kw):
     kw.setdefault("clock", lambda: 0.0)
     kw.setdefault("enrich", _ENRICH)
+    kw.setdefault("startup_replay_quiet_s", 0.0)
     return Daemon(client, list(probes), **kw)
 
 
@@ -1878,6 +1881,167 @@ def test_run_loop_processes_idle_event_from_stream():
     except Stop:
         pass
     assert ("w1:p1", "working", "⏳ review") in client.reports
+
+
+def test_run_drains_startup_replay_before_running_slow_probes():
+    client = FakeClient([_agent(status="idle")])
+    streams = []
+    observed_read_counts = []
+
+    class StopAfterProbe:
+        name = "stop-after-probe"
+
+        def check(self, ctx):
+            observed_read_counts.append(streams[0].read_count)
+            raise Stop()
+
+    def factory(subs):
+        stream = DripStream(subs)
+        streams.append(stream)
+        for index in range(40):
+            stream.feed(
+                {
+                    "event": "pane_agent_detected",
+                    "data": {
+                        "type": "pane_agent_detected",
+                        "pane_id": "w1:p1",
+                        "agent": "claude",
+                        "replay_index": index,
+                    },
+                }
+            )
+        return stream
+
+    d = make_daemon(
+        client,
+        [StopAfterProbe()],
+        stream_factory=factory,
+        clock=time.monotonic,
+        startup_replay_quiet_s=0.01,
+        startup_replay_max_s=0.1,
+    )
+
+    try:
+        d.run(sleep=lambda delay: None)
+    except Stop:
+        pass
+
+    assert len(streams) == 1
+    assert observed_read_counts == [40]
+
+
+def test_run_reconnects_when_stream_closes_during_startup_replay():
+    client = FakeClient([_agent(status="idle")])
+    streams = []
+    probe_calls = []
+
+    class Probe:
+        name = "probe"
+
+        def check(self, ctx):
+            probe_calls.append(ctx.pane_id)
+            return None
+
+    def factory(subs):
+        stream = FakeStream(subs)
+        streams.append(stream)
+        stream.feed({"event": "replayed", "data": {}})
+        stream._w.close()
+        return stream
+
+    d = make_daemon(
+        client,
+        [Probe()],
+        stream_factory=factory,
+        clock=time.monotonic,
+        startup_replay_quiet_s=0.01,
+        startup_replay_max_s=0.1,
+    )
+
+    try:
+        d.run(sleep=_stop_sleep)
+    except Stop:
+        pass
+
+    assert len(streams) == 1
+    assert streams[0].closed is True
+    assert probe_calls == []
+
+
+def test_startup_replay_drain_stops_at_hard_max():
+    stream = DripStream()
+    for index in range(40):
+        stream.feed({"event": "replayed", "data": {"index": index}})
+    ticks = {"now": 0.0}
+
+    def clock():
+        ticks["now"] += 0.01
+        return ticks["now"]
+
+    d = make_daemon(
+        FakeClient(),
+        clock=clock,
+        startup_replay_quiet_s=1.0,
+        startup_replay_max_s=0.05,
+    )
+    selector = selectors.DefaultSelector()
+    selector.register(stream, selectors.EVENT_READ)
+    try:
+        result = d._drain_startup_replay(selector, stream)
+    finally:
+        selector.close()
+        stream.close()
+
+    assert result is not None
+    enabled, drained = result
+    assert enabled is True
+    assert 0 < drained < 40
+
+
+def test_run_reconnects_when_startup_resync_fails():
+    client = FakeClient([_agent(status="idle")])
+    snapshot_calls = {"count": 0}
+    streams = []
+    probe_calls = []
+
+    def snapshot():
+        snapshot_calls["count"] += 1
+        if snapshot_calls["count"] == 3:
+            raise HerdrUnavailable("down after replay")
+        return {"agents": [dict(agent) for agent in client.agents.values()]}
+
+    class Probe:
+        name = "probe"
+
+        def check(self, ctx):
+            probe_calls.append(ctx.pane_id)
+            return None
+
+    def factory(subs):
+        stream = FakeStream(subs)
+        streams.append(stream)
+        return stream
+
+    client.session_snapshot = snapshot
+    d = make_daemon(
+        client,
+        [Probe()],
+        stream_factory=factory,
+        clock=time.monotonic,
+        startup_replay_quiet_s=0.01,
+        startup_replay_max_s=0.1,
+    )
+
+    try:
+        d.run(sleep=_stop_sleep)
+    except Stop:
+        pass
+
+    assert snapshot_calls["count"] == 3
+    assert len(streams) == 1
+    assert streams[0].closed is True
+    assert d._stream is None
+    assert probe_calls == []
 
 
 def test_run_drains_replayed_lifecycle_storm_before_resync():
