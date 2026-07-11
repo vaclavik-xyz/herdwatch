@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import math
 import os
 import selectors
 import signal
@@ -136,6 +137,10 @@ class Daemon:
         interval = self._reprobe
         if kind == "progress":
             interval = max(interval, self._progress_interval)
+        max_interval = TTL_MAX_MS / 2000.0
+        if not math.isfinite(interval):
+            interval = max_interval if interval > 0 else 0.0
+        interval = max(0.0, min(interval, max_interval))
         ttl = int(2 * interval * 1000)
         return max(TTL_MIN_MS, min(TTL_MAX_MS, ttl))
 

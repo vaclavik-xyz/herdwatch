@@ -155,6 +155,24 @@ def test_nonnumeric_intervals_use_safe_defaults(tmp_path, caplog):
     assert cfg.progress_interval_s == 4.0
 
 
+def test_excessive_intervals_use_safe_defaults(tmp_path, caplog):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        "[daemon]\n"
+        "resync_interval_s = 1e308\n"
+        "reprobe_interval_s = 1e308\n"
+        "[progress]\n"
+        "interval_s = 1e308\n"
+    )
+
+    with caplog.at_level("WARNING"):
+        cfg = load(path=str(p))
+
+    assert cfg.resync_interval_s == 60.0
+    assert cfg.reprobe_interval_s == 15.0
+    assert cfg.progress_interval_s == 4.0
+
+
 def test_poll_interval_is_ignored_with_warning(tmp_path, caplog):
     p = tmp_path / "config.toml"
     p.write_text("[daemon]\npoll_interval_s = 4\n")

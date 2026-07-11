@@ -14,6 +14,7 @@ DEFAULT_PATH = os.path.expanduser("~/.config/herdwatch/config.toml")
 # constantly spawn subprocesses, so descendant-scanning yields false positives.
 # The reliable signals (CI, roborev, markers) are on by default.
 _DEFAULT_PROBES = {"roborev": True, "ci": True, "bgjobs": False, "marker": True}
+_MAX_RUNTIME_INTERVAL_S = 43_200.0
 
 
 def _positive_interval(value, default: float, key: str) -> float:
@@ -21,11 +22,17 @@ def _positive_interval(value, default: float, key: str) -> float:
         interval = float(value)
     except (TypeError, ValueError):
         interval = math.nan
-    if math.isfinite(interval) and interval > 0:
+    if (
+        math.isfinite(interval)
+        and interval > 0
+        and interval <= _MAX_RUNTIME_INTERVAL_S
+    ):
         return interval
     log.warning(
-        "config: %s must be a finite positive number; using default %.1f",
+        "config: %s must be a finite positive number no greater than %.1f; "
+        "using default %.1f",
         key,
+        _MAX_RUNTIME_INTERVAL_S,
         default,
     )
     return default

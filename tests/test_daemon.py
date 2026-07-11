@@ -779,6 +779,8 @@ def test_ttl_clamped_to_valid_range():
     assert d._ttl_ms() == TTL_MIN_MS
     d2 = make_daemon(client, [], reprobe_interval_s=100_000)
     assert d2._ttl_ms() == TTL_MAX_MS
+    d3 = make_daemon(client, [], reprobe_interval_s=1e308)
+    assert d3._ttl_ms() == TTL_MAX_MS
 
 
 def test_progress_uses_metadata_not_report_agent():
