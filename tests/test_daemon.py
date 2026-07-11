@@ -638,6 +638,23 @@ def test_shutdown_retains_verified_hold_when_readback_is_unavailable():
     assert d.managed["w1:p1"].kind == "hold"
 
 
+def test_shutdown_retains_verified_hold_when_pane_id_is_reused():
+    client = FakeClient([_agent(status="idle", term="term-original")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.set_agents([_agent(status="idle", term="term-reused")])
+
+    d.shutdown()
+
+    assert client.releases == []
+    assert d.managed["w1:p1"].terminal_id == "term-original"
+
+
 def test_unverified_report_falls_back_when_foreign_owner_becomes_visible():
     client = FakeClient([_agent(status="idle")], report_ok=None)
     d = make_daemon(
@@ -1287,6 +1304,29 @@ def test_shutdown_retains_legacy_cleanup_when_readback_is_unavailable():
 
     assert client.releases == []
     assert set(d._legacy_release) == {"w1:p1"}
+
+
+def test_shutdown_retains_legacy_cleanup_when_pane_id_is_reused():
+    client = FakeClient([_agent(status="idle", term="term-original")])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+                "terminal_id": "term-original",
+            }
+        ]
+    )
+    seed(d, client)
+    client.set_agents([_agent(status="idle", term="term-reused")])
+
+    d.shutdown()
+
+    assert client.releases == []
+    assert d._legacy_release["w1:p1"].terminal_id == "term-original"
 
 
 def test_release_gone_keeps_entry_and_schedules_resync():

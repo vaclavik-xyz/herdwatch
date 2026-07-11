@@ -851,6 +851,12 @@ class Daemon:
             and rec.get("custom_status") == mp.custom_status
         )
 
+    @staticmethod
+    def _record_matches_terminal(rec: dict, mp: ManagedPane) -> bool:
+        return bool(mp.terminal_id) and (
+            rec.get("terminal_id") == mp.terminal_id
+        )
+
     def _assert_hold(self, pane_id: str, agent: str, label: str) -> None:
         owner = self._foreign_session_owner(pane_id)
         if owner is not None:
@@ -926,6 +932,13 @@ class Daemon:
                     pane_id,
                 )
                 return False
+        if refresh and not self._record_matches_terminal(observed, mp):
+            log.warning(
+                "cannot verify hold %s terminal identity for cleanup; "
+                "keeping it to retry",
+                pane_id,
+            )
+            return False
         if mp.kind == "hold-pending":
             if not self._record_matches_hold(observed, mp):
                 del self.managed[pane_id]
@@ -1330,9 +1343,17 @@ class Daemon:
 
         for pane_id, mp in list(self._legacy_release.items()):
             try:
-                if self._readback_record(pane_id) is None:
+                observed = self._readback_record(pane_id)
+                if observed is None:
                     log.warning(
                         "cannot verify legacy cleanup %s on shutdown; "
+                        "keeping it to retry",
+                        pane_id,
+                    )
+                    continue
+                if not self._record_matches_terminal(observed, mp):
+                    log.warning(
+                        "cannot verify legacy cleanup %s terminal identity; "
                         "keeping it to retry",
                         pane_id,
                     )
