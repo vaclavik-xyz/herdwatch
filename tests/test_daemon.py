@@ -2222,6 +2222,71 @@ def test_run_rechecks_managed_hold_when_probe_sweep_outlives_interval():
     assert released_at["value"] - expires_at["value"] <= 15.0
 
 
+def test_run_drains_stream_between_due_managed_reprobes():
+    checks_since_read = {"value": 0, "max": 0}
+
+    class TrackingStream(FakeStream):
+        def read_events(self, *, max_chunks=None):
+            checks_since_read["value"] = 0
+            return super().read_events(max_chunks=max_chunks)
+
+    class SlowPending:
+        name = "slow"
+
+        def check(self, ctx):
+            checks_since_read["value"] += 1
+            checks_since_read["max"] = max(
+                checks_since_read["max"], checks_since_read["value"]
+            )
+            return Pending("review", 30, "roborev")
+
+    class StopAfterBothReports(FakeClient):
+        def report_agent(
+            self, pane_id, source, agent, state, custom_status=None
+        ):
+            result = super().report_agent(
+                pane_id, source, agent, state, custom_status
+            )
+            if len(self.reports) == 2:
+                raise Stop()
+            return result
+
+    client = StopAfterBothReports(
+        [
+            _agent(pane="w1:p1", status="idle"),
+            _agent(pane="w1:p2", status="idle"),
+        ]
+    )
+    d = make_daemon(
+        client,
+        [SlowPending()],
+        stream_factory=lambda subs: TrackingStream(subs),
+        reprobe_interval_s=15.0,
+        resync_interval_s=999.0,
+        progress_interval_s=999.0,
+    )
+    d.adopt(
+        [
+            {
+                "pane_id": pane_id,
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+                "terminal_id": f"term-{pane_id}",
+            }
+            for pane_id in ("w1:p1", "w1:p2")
+        ]
+    )
+
+    try:
+        d.run(sleep=lambda delay: None)
+    except Stop:
+        pass
+
+    assert len(client.reports) == 2
+    assert checks_since_read["max"] == 1
+
+
 def test_run_fast_probes_new_agent_discovered_between_panes():
     order = []
 

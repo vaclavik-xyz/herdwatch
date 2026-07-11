@@ -1150,12 +1150,13 @@ class Daemon:
         backoff = self._backoff_base
         registered = None
         connected_at = None
+        managed_reprobe_cursor = 0
         next_reprobe = next_progress = self._clock()
         next_resync = self._clock() + self._resync_interval
 
         def _drain_probe_events() -> bool:
             """Keep the non-blocking status stream moving between probes."""
-            nonlocal backoff
+            nonlocal backoff, managed_reprobe_cursor
             stream = self._stream
             if stream is None or stream.closed:
                 return False
@@ -1178,13 +1179,29 @@ class Daemon:
                         rec = self._registry.get(pane_id) or {}
                         if rec.get("agent_status") in ("idle", "done"):
                             self._probe_pane(pane_id, fast=True)
-            if self._stream is stream and not stream.closed and self._reprobe > 0:
+            if (
+                self._stream is stream
+                and not stream.closed
+                and self._reprobe > 0
+            ):
                 # A full sweep can outlive the reprobe interval when external
-                # probes are slow. Keep already-managed panes on their own
-                # interval so an expired marker is not delayed by the rest of
-                # the registry plus another complete interval.
-                for pane_id in list(self.managed):
-                    self._probe_pane(pane_id)
+                # probes are slow. Recheck at most one due managed pane per
+                # stream drain; rotating the starting point keeps the socket
+                # responsive without starving a repeatedly failing pane.
+                panes = list(self.managed)
+                if panes:
+                    now = self._clock()
+                    for offset in range(len(panes)):
+                        index = (
+                            managed_reprobe_cursor + offset
+                        ) % len(panes)
+                        pane_id = panes[index]
+                        last = self._last_probe.get(pane_id)
+                        if last is not None and now - last < self._reprobe:
+                            continue
+                        managed_reprobe_cursor = (index + 1) % len(panes)
+                        self._probe_pane(pane_id)
+                        break
             return self._stream is stream and not stream.closed
 
         while True:
