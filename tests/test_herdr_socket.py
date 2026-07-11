@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+import herdwatch.herdr_socket as herdr_socket
 from herdwatch.herdr_socket import (
     EventStream,
     HerdrApiError,
@@ -252,6 +253,31 @@ def _wait_events(stream, want=1, timeout=2.0):
     return got
 
 
+class _ChunkSocket:
+    """Non-blocking recv fake that preserves socket.recv(size) semantics."""
+
+    def __init__(self, *chunks):
+        self._chunks = list(chunks)
+
+    def recv(self, size):
+        if not self._chunks:
+            raise BlockingIOError
+        chunk = self._chunks.pop(0)
+        assert len(chunk) <= size
+        return chunk
+
+    def close(self):
+        pass
+
+
+def _stream_with_chunks(*chunks):
+    stream = EventStream.__new__(EventStream)
+    stream._sock = _ChunkSocket(*chunks)
+    stream._buf = b""
+    stream.closed = False
+    return stream
+
+
 def test_event_stream_subscribes_and_receives(server):
     stream = EventStream([{"type": "pane.created"}], socket_path=server.path)
     try:
@@ -449,173 +475,55 @@ def test_event_stream_raises_unavailable_on_falsy_error_value(sock_dir):
         srv.close()
 
 
-def test_event_stream_caps_buffer_on_missing_newline(sock_dir):
+def test_event_stream_caps_buffer_on_missing_newline(monkeypatch):
     """Regression: stream should close if buffer grows over max-response-size without newline."""
-    path = str(sock_dir / "oversized_stream.sock")
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    srv.listen(1)
+    monkeypatch.setattr(herdr_socket, "_MAX_RESPONSE_SIZE", 32)
+    stream = _stream_with_chunks(b"x" * 33)
 
-    def send_valid_then_oversized():
-        conn, _ = srv.accept()
-        # Read subscription request
-        buf = b""
-        while b"\n" not in buf:
-            chunk = conn.recv(65536)
-            if not chunk:
-                return
-            buf += chunk
-        # Send subscription ACK
-        ack = {"id": "sub", "result": {"type": "subscription_started"}}
-        conn.sendall(json.dumps(ack).encode() + b"\n")
-
-        # Send one valid event line
-        valid_event = {"event": "pane.created", "data": {"id": "test"}}
-        conn.sendall(json.dumps(valid_event).encode() + b"\n")
-
-        # Now send oversized data without newline (>1MB)
-        try:
-            oversized = b"x" * (1024 * 1024 + 10000)
-            conn.sendall(oversized)
-            time.sleep(10)  # Keep connection open
-        except OSError:
-            pass
-        finally:
-            conn.close()
-
-    t = threading.Thread(target=send_valid_then_oversized, daemon=True)
-    t.start()
-    try:
-        stream = EventStream([{"type": "pane.created"}], socket_path=path)
-        try:
-            # Read the valid event
-            events = _wait_events(stream, want=1, timeout=2.0)
-            assert events == [{"event": "pane.created", "data": {"id": "test"}}]
-            assert not stream.closed
-
-            # Give the stream time to read and detect the oversized buffer
-            # The oversized data is 1MB+, so we need multiple read cycles
-            deadline = time.time() + 5.0
-            while time.time() < deadline and not stream.closed:
-                stream.read_events()
-                time.sleep(0.001)  # Faster polling to catch the close quickly
-
-            # Assert that the stream detected the oversized buffer and closed
-            assert stream.closed
-        finally:
-            stream.close()
-    finally:
-        srv.close()
+    assert stream.read_events() == []
+    assert stream.closed
+    assert stream._buf == b""
 
 
-def test_event_stream_rejects_oversized_complete_line(sock_dir):
+def test_event_stream_rejects_oversized_whitespace_line(monkeypatch):
+    """Regression: stream should close on oversized whitespace-only line."""
+    monkeypatch.setattr(herdr_socket, "_MAX_RESPONSE_SIZE", 32)
+    stream = _stream_with_chunks(b" " * 33 + b"\n")
+
+    assert stream.read_events() == []
+    assert stream.closed
+    assert stream._buf == b""
+
+
+def test_event_stream_rejects_oversized_whitespace_line_after_close(monkeypatch):
+    """The EOF-drain path must not skip the same oversized whitespace line."""
+    monkeypatch.setattr(herdr_socket, "_MAX_RESPONSE_SIZE", 32)
+    trailing_event = json.dumps({"event": "must-not-be-parsed"}).encode() + b"\n"
+    stream = _stream_with_chunks()
+    stream.closed = True
+    stream._buf = b" " * 33 + b"\n" + trailing_event
+
+    assert stream.read_events() == []
+    assert stream._buf == b""
+
+
+def test_event_stream_rejects_oversized_complete_line(monkeypatch):
     """Regression: stream should close if a complete line exceeds max-response-size."""
-    path = str(sock_dir / "oversized_line.sock")
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    srv.listen(1)
+    monkeypatch.setattr(herdr_socket, "_MAX_RESPONSE_SIZE", 32)
+    stream = _stream_with_chunks(b"x" * 33 + b"\n")
 
-    def send_oversized_complete_line():
-        conn, _ = srv.accept()
-        # Read subscription request
-        buf = b""
-        while b"\n" not in buf:
-            chunk = conn.recv(65536)
-            if not chunk:
-                return
-            buf += chunk
-        # Send subscription ACK
-        ack = {"id": "sub", "result": {"type": "subscription_started"}}
-        conn.sendall(json.dumps(ack).encode() + b"\n")
-
-        # Send a valid event followed by an oversized complete line (with newline)
-        valid_event = {"event": "pane.created", "data": {"id": "test"}}
-        conn.sendall(json.dumps(valid_event).encode() + b"\n")
-
-        # Send an oversized complete line: just 1MB+ of data with a newline at the end
-        oversized_line = b"x" * (1024 * 1024 + 10000) + b"\n"
-        try:
-            conn.sendall(oversized_line)
-            time.sleep(10)
-        except OSError:
-            pass
-        finally:
-            conn.close()
-
-    t = threading.Thread(target=send_oversized_complete_line, daemon=True)
-    t.start()
-    try:
-        stream = EventStream([{"type": "pane.created"}], socket_path=path)
-        try:
-            # Read available events
-            events = _wait_events(stream, want=1, timeout=2.0)
-            assert events == [{"event": "pane.created", "data": {"id": "test"}}]
-
-            # Keep reading to get to the oversized line
-            deadline = time.time() + 5.0
-            while time.time() < deadline and not stream.closed:
-                stream.read_events()
-                time.sleep(0.001)
-
-            # The stream should detect the oversized line and close
-            assert stream.closed
-        finally:
-            stream.close()
-    finally:
-        srv.close()
+    assert stream.read_events() == []
+    assert stream.closed
+    assert stream._buf == b""
 
 
-def test_event_stream_caps_buffer_when_incomplete_suffix_oversized(sock_dir):
+def test_event_stream_caps_buffer_when_incomplete_suffix_oversized(monkeypatch):
     """Regression: stream should close if incomplete suffix after complete line exceeds max-response-size."""
-    path = str(sock_dir / "oversized_suffix.sock")
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    srv.listen(1)
+    monkeypatch.setattr(herdr_socket, "_MAX_RESPONSE_SIZE", 32)
+    valid_event = {"event": "ok"}
+    payload = json.dumps(valid_event).encode() + b"\n" + b"x" * 33
+    stream = _stream_with_chunks(payload)
 
-    def send_valid_and_oversized_together():
-        conn, _ = srv.accept()
-        # Read subscription request
-        buf = b""
-        while b"\n" not in buf:
-            chunk = conn.recv(65536)
-            if not chunk:
-                return
-            buf += chunk
-        # Send subscription ACK
-        ack = {"id": "sub", "result": {"type": "subscription_started"}}
-        conn.sendall(json.dumps(ack).encode() + b"\n")
-
-        # Send valid event + oversized suffix WITHOUT NEWLINE, all in one send
-        # This tests the case where a complete line is followed by incomplete oversized data
-        valid_event = {"event": "pane.created", "data": {"id": "test"}}
-        valid_json = json.dumps(valid_event).encode() + b"\n"
-        oversized = b"x" * (1024 * 1024 + 10000)
-        try:
-            conn.sendall(valid_json + oversized)
-            time.sleep(10)
-        except OSError:
-            pass
-        finally:
-            conn.close()
-
-    t = threading.Thread(target=send_valid_and_oversized_together, daemon=True)
-    t.start()
-    try:
-        stream = EventStream([{"type": "pane.created"}], socket_path=path)
-        try:
-            # Read available events
-            events = _wait_events(stream, want=1, timeout=2.0)
-            assert events == [{"event": "pane.created", "data": {"id": "test"}}]
-
-            # Keep reading to accumulate the oversized suffix until closed
-            deadline = time.time() + 5.0
-            while time.time() < deadline and not stream.closed:
-                stream.read_events()
-                time.sleep(0.001)
-
-            # The stream should detect the oversized incomplete suffix and close
-            assert stream.closed
-        finally:
-            stream.close()
-    finally:
-        srv.close()
+    assert stream.read_events() == [valid_event]
+    assert stream.closed
+    assert stream._buf == b""

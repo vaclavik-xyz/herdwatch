@@ -182,24 +182,21 @@ class EventStream:
                 # Continuously process complete lines to prevent buffer growth.
                 while b"\n" in self._buf:
                     line, self._buf = self._buf.split(b"\n", 1)
-                    if not line.strip():
-                        continue
-                    # Enforce max line size: reject lines exceeding _MAX_RESPONSE_SIZE
+                    # Enforce max line size first, before checking if line is empty.
+                    # This prevents whitespace-only lines from bypassing the check.
                     if len(line) > _MAX_RESPONSE_SIZE:
                         self.closed = True
                         self._buf = b""
                         return events
+                    if not line.strip():
+                        continue
                     try:
                         events.append(json.loads(line))
                     except ValueError:
                         pass  # skip malformed line, keep the stream alive
-                # Cap buffer growth: if buffer exceeds max size without a complete line,
-                # treat the stream as broken and close it (don't raise; just close cleanly)
-                if len(self._buf) > _MAX_RESPONSE_SIZE and b"\n" not in self._buf:
-                    self.closed = True
-                    self._buf = b""  # Drop the oversized garbage
-                    break
-                # Also check if incomplete suffix exceeds max size (after parsing complete lines).
+                # The loop above drained every complete line, so only an
+                # incomplete suffix remains. Bound it without raising; the
+                # daemon reconnects when it observes `closed`.
                 if len(self._buf) > _MAX_RESPONSE_SIZE:
                     self.closed = True
                     self._buf = b""
@@ -207,13 +204,13 @@ class EventStream:
         # Process any remaining complete lines after socket is closed
         while b"\n" in self._buf:
             line, self._buf = self._buf.split(b"\n", 1)
-            if not line.strip():
-                continue
-            # Enforce max line size for remaining lines
+            # Enforce max line size first, before checking if line is empty
             if len(line) > _MAX_RESPONSE_SIZE:
                 self.closed = True
                 self._buf = b""
                 break
+            if not line.strip():
+                continue
             try:
                 events.append(json.loads(line))
             except ValueError:
