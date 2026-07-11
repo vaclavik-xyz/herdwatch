@@ -22,21 +22,21 @@ and releases it the moment the work clears.
 ## How it works
 
 herdwatch is a standalone background daemon — **not** a herdr fork and not a
-screen-scraper. It talks to herdr over its socket/CLI (herdr's documented plugin
-API surface), polls `herdr agent list`, and for panes that went **idle** runs a
-set of probes. While any probe is pending it asserts `working` + a `⏳` label via
-`herdr pane report-agent`; when they clear it releases the pane. No changes to
-herdr, no per-agent setup, and it works for any agent herdr tracks.
+screen-scraper. It requires **herdr ≥ 0.7.2** and talks directly to herdr's
+socket API. It bootstraps from `session.snapshot`, subscribes to herdr's socket
+events (`pane.agent_status_changed` per pane plus lifecycle events), reacts to
+idle/done edges within ~100 ms, and re-verifies against a fresh snapshot every
+`resync_interval_s` (60 s by default), so correctness never depends on seeing
+every event. For idle panes, it runs a set of probes; while any probe is pending
+it asserts `working` + a `⏳` label via `pane.report_agent`, and releases the pane
+when the work clears. No changes to herdr, no per-agent setup, and it works for
+any agent herdr tracks.
 
-It deliberately does **not** hold a pane herdr reports as `done` — herdr's
-"finished, but you haven't looked yet" state. herdwatch cannot re-assert `done`
-(herdr's `report-agent` only accepts `idle`/`working`/`blocked`/`unknown`), so
-overriding a `done` pane to `working` and later releasing it would degrade it to
-`idle`, making unseen work look already-seen. So a freshly finished pane keeps
-its `done` flag; once you view it (herdr → `idle`) herdwatch picks up any pending
-`⏳` hold. The trade-off: in the short window before you look, a `done` pane with
-CI/review still running shows `done` without the `⏳` — but `done` already means
-"go look", and the `⏳` appears the moment you do.
+A pane herdr reports as `done` keeps that semantic state. If work is still
+pending, herdwatch adds a **display-only** `⏳` label via
+`pane.report_metadata`, shown as `done · ⏳ CI`. When you view the pane and herdr
+transitions it from `done` to `idle`, herdwatch clears the metadata label; if
+the work is still pending, a normal `working ⏳` hold takes over.
 
 **The key trick** (reusable for any similar tool): a state reported through
 `herdr pane report-agent --source <name>` is *authoritative and durable over
@@ -60,10 +60,9 @@ While a Claude Code agent is actively working through a task list, herdwatch
 shows how far along it is — `3/7 Fixing auth bug` — as the pane's status
 label. It reads the session's task files (`~/.claude/tasks/`, matched via
 herdr's `agent_session` id), so no per-agent setup is needed; other agents
-are skipped. Because herdwatch asserts the label over herdr's own detection,
-it re-checks the pane each tick with `herdr agent explain` (live screen
-detection) and drops the label the moment the agent actually stops — a pane
-waiting for your input is never masked. Disable with:
+are skipped. The progress label is display-only metadata published through
+`pane.report_metadata`; herdr keeps detecting the real lifecycle state beneath
+it, so the label never masks `blocked` or `idle`. Disable with:
 
 ```toml
 [progress]
@@ -118,7 +117,7 @@ file is optional. The full set of keys:
 
 ```toml
 [daemon]
-poll_interval_s = 4         # how often to re-check herdr
+resync_interval_s = 60      # fresh snapshot safety-net interval
 reprobe_interval_s = 15     # min seconds between probing the same pane
 
 [probes]
@@ -136,6 +135,7 @@ ignore = ["vite", "webpack"]  # extra process names to treat as "not a job"
 
 [progress]
 enabled = true               # default
+interval_s = 4               # how often to refresh task progress
 
 [panes]
 allow = []                  # if non-empty, only manage these pane ids
@@ -153,17 +153,12 @@ names to skip.
 
 ## v1 limitations
 
-- **Poll-based, not event-driven.** The daemon polls `herdr agent list` every
-  `poll_interval_s` (~4s), so a hold appears up to one poll interval after a
-  pane goes idle.
-- **No `⏳` on unseen (`done`) panes.** herdwatch only holds already-seen
-  (`idle`) panes; a freshly finished pane keeps herdr's `done` flag and does
-  not get a `⏳` label until you view it and it becomes `idle` (see *How it
-  works*). So pending CI/review on a pane you haven't looked at yet is not
-  shown until you look — at which point the `⏳` appears.
+- **Requires herdr ≥ 0.7.2.** The daemon needs socket `session.snapshot` and
+  event subscriptions. There is no CLI-polling fallback; `herdwatch doctor`
+  checks this requirement.
 - **`status` is a snapshot, not a live query.** `herdwatch status` reads the
-  state file the daemon writes each tick, so it lags reality by up to one
-  `poll_interval_s`. If the daemon died uncleanly the file lingers, but `status`
+  state file the daemon writes each sweep, so it lags reality by up to one
+  sweep interval. If the daemon died uncleanly the file lingers, but `status`
   flags this by checking the recorded pid. (`socket_path` in config is reserved
   for a future live status channel and is currently unused.)
 - **Recovery depends on the state file.** On clean shutdown (SIGTERM / launchctl
@@ -172,7 +167,8 @@ names to skip.
   `~/.local/state/herdwatch/managed.json` — but if that file is deleted while the
   daemon is down, any pane held at crash time is left showing `working ⏳` until
   it next becomes busy-then-idle.
-- **No "step aside" on resumed work.** While herdwatch asserts `working`, its
-  own assertion masks the agent's real status, so it cannot detect the human
-  resuming genuine work mid-wait; the ⏳ label persists until the background
-  work clears.
+- **No "step aside" while a `⏳` hold is active.** While herdwatch asserts
+  `working` for an idle pane, its own assertion masks the agent's real status,
+  so it cannot detect the human resuming genuine work mid-wait; the hold
+  persists until the background work clears. Display-only progress labels do
+  not mask the underlying lifecycle state.

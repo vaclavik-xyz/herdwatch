@@ -1,7 +1,7 @@
 # herdwatch: migrate to the herdr socket API (event-driven daemon)
 
 **Date:** 2026-07-11
-**Status:** approved
+**Status:** implemented
 
 ## Goal
 
