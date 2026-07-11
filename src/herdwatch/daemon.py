@@ -412,34 +412,11 @@ class Daemon:
         if rec is None:
             self._schedule_resync(debounce=False)  # unknown pane: topology drifted
             return
-        event_status = data.get("agent_status") or "unknown"
-        mp = self.managed.get(pane_id)
-        if mp is not None:
-            expected = {
-                "done": "done",
-                "idle-meta": "idle",
-            }.get(mp.kind, "working")
-            if (
-                event_status == expected
-                and (data.get("custom_status") or "") == mp.custom_status
-                and (
-                    mp.kind != "hold-pending"
-                    or data.get("agent") == mp.agent
-                )
-            ):
-                if mp.kind == "hold-pending":
-                    mp.kind = "hold"
-                    self._adopted.discard(pane_id)
-                    log.info("verified pending hold %s from event", pane_id)
-                rec["agent_status"] = event_status
-                if data.get("agent"):
-                    rec["agent"] = data["agent"]
-                return  # ack of our own report/metadata write
-
         # Herdr 0.7.3 replays retained subscription events. Snapshot/readback
         # is truth: a stale working event must not suppress a hold for a pane
         # that is currently idle (and a stale idle event must not claim one
         # that is currently working).
+        event_status = data.get("agent_status") or "unknown"
         prev = rec.get("agent_status")
         observed = self._client.agent_get(pane_id)
         if observed is None:
@@ -448,6 +425,32 @@ class Daemon:
         self._registry[pane_id] = observed
         self._remember_record(observed)
         status = observed.get("agent_status") or "unknown"
+        mp = self.managed.get(pane_id)
+        if mp is not None:
+            expected = {
+                "done": "done",
+                "idle-meta": "idle",
+            }.get(mp.kind, "working")
+            event_matches = (
+                event_status == expected
+                and (data.get("custom_status") or "") == mp.custom_status
+                and (
+                    mp.kind != "hold-pending"
+                    or data.get("agent") == mp.agent
+                )
+            )
+            observed_matches = (
+                status == expected
+                and observed.get("agent") == mp.agent
+                and (observed.get("custom_status") or "")
+                == mp.custom_status
+            )
+            if event_matches and observed_matches:
+                if mp.kind == "hold-pending":
+                    mp.kind = "hold"
+                    self._adopted.discard(pane_id)
+                    log.info("verified pending hold %s from event", pane_id)
+                return  # verified ack of our own report/metadata write
         if mp is not None and mp.kind == "idle-meta" and status != "idle":
             if not self._clear_metadata(pane_id, f"left idle ({status})"):
                 return

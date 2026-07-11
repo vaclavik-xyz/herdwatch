@@ -442,10 +442,30 @@ def test_unverified_report_is_confirmed_by_matching_status_event():
     )
     seed(d, client)
     d._reprobe_sweep()
+    client.agents["w1:p1"].update(
+        agent_status="working", custom_status="⏳ review"
+    )
 
     d.dispatch_event(_status_event(status="working", custom="⏳ review"))
 
     assert d.managed["w1:p1"].kind == "hold"
+
+
+def test_unverified_report_rejects_stale_matching_status_event():
+    client = FakeClient([_agent(status="idle")], report_ok=None)
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+
+    d.dispatch_event(_status_event(status="working", custom="⏳ review"))
+
+    assert d.managed["w1:p1"].kind == "hold-pending"
+    assert d._registry["w1:p1"]["agent_status"] == "idle"
+    assert client.releases == []
 
 
 def test_unverified_report_ignores_matching_label_from_different_agent():
@@ -1154,6 +1174,9 @@ def test_self_echo_event_is_ignored():
     d._reprobe_sweep()  # hold asserted
     assert len(client.reports) == 1
     last_probe = d._last_probe["w1:p1"]
+    client.agents["w1:p1"].update(
+        agent_status="working", custom_status="⏳ review"
+    )
     d.dispatch_event(_status_event(status="working", custom="⏳ review"))
     assert len(client.reports) == 1  # echo: no re-probe, no re-assert
     assert d._registry["w1:p1"]["agent_status"] == "working"
@@ -1188,6 +1211,7 @@ def test_foreign_session_idle_metadata_self_echo_is_ignored():
     seed(d, client)
     d._reprobe_sweep()
     last_probe = d._last_probe["w1:p1"]
+    client.agents["w1:p1"]["custom_status"] = "⏳ review"
 
     d.dispatch_event(_status_event(status="idle", custom="⏳ review"))
 
