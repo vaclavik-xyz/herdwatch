@@ -46,11 +46,21 @@ def resolve_socket_path(env: dict | None = None) -> str:
 
 
 def _parse_response(line: bytes) -> dict:
-    msg = json.loads(line)
-    err = msg.get("error")
-    if err:
+    try:
+        msg = json.loads(line)
+    except (TypeError, ValueError) as exc:
+        raise HerdrUnavailable("invalid JSON response from herdr") from exc
+    if not isinstance(msg, dict):
+        raise HerdrUnavailable("herdr response must be a JSON object")
+    if "error" in msg:
+        err = msg["error"]
+        if not isinstance(err, dict):
+            raise HerdrUnavailable("herdr response error field must be an object")
         raise HerdrApiError(err.get("code", "unknown"), err.get("message", ""))
-    return msg.get("result") or {}
+    result = msg.get("result")
+    if not isinstance(result, dict):
+        raise HerdrUnavailable("herdr response result field must be an object")
+    return result
 
 
 def request(method: str, params: dict, *, socket_path: str | None = None,

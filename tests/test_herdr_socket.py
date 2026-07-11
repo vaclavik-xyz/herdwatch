@@ -71,6 +71,10 @@ class FakeServer:
             if reply is None:
                 reply = {"id": msg["id"],
                          "error": {"code": "unknown_method", "message": msg["method"]}}
+            elif isinstance(reply, bytes):
+                conn.sendall(reply + b"\n")
+                conn.close()
+                continue
             else:
                 reply = dict(reply)
                 reply.setdefault("id", msg["id"])
@@ -135,6 +139,32 @@ def test_request_raises_api_error(server):
     with pytest.raises(HerdrApiError) as exc:
         request("nope.nope", {}, socket_path=server.path)
     assert exc.value.code == "unknown_method"
+
+
+@pytest.mark.parametrize("reply", [
+    b"not-json",
+    b"[]",
+    b'{"error":[]}',
+    b'{"result":[]}',
+    b"{}",
+])
+def test_request_normalizes_invalid_response_shapes(sock_dir, reply):
+    server = FakeServer(sock_dir, responses={"bad.response": reply})
+    try:
+        with pytest.raises(HerdrUnavailable):
+            request("bad.response", {}, socket_path=server.path)
+    finally:
+        server.close()
+
+
+def test_request_treats_present_empty_error_as_api_error(sock_dir):
+    server = FakeServer(sock_dir, responses={"bad.response": b'{"error":{}}'})
+    try:
+        with pytest.raises(HerdrApiError) as exc:
+            request("bad.response", {}, socket_path=server.path)
+        assert exc.value.code == "unknown"
+    finally:
+        server.close()
 
 
 def test_request_raises_unavailable_when_no_socket(sock_dir):
