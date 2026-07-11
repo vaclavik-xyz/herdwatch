@@ -124,10 +124,17 @@ class EventStream:
         deadline = time.monotonic() + ack_timeout_s
         try:
             self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self._sock.settimeout(ack_timeout_s)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HerdrUnavailable("timeout before subscribe connect")
+            self._sock.settimeout(remaining)
             self._sock.connect(path)
             payload = json.dumps({"id": "herdwatch-sub", "method": "events.subscribe",
                                   "params": {"subscriptions": subscriptions}})
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HerdrUnavailable("timeout before subscribe send")
+            self._sock.settimeout(remaining)
             self._sock.sendall(payload.encode() + b"\n")
             while b"\n" not in self._buf:
                 remaining = deadline - time.monotonic()

@@ -334,6 +334,47 @@ def test_event_stream_subscribes_and_receives(server):
         stream.close()
 
 
+def test_event_stream_send_uses_remaining_ack_deadline(monkeypatch):
+    class HandshakeSocket:
+        def __init__(self):
+            self.timeout = None
+            self.send_timeout = None
+            self.closed = False
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def connect(self, path):
+            pass
+
+        def sendall(self, payload):
+            self.send_timeout = self.timeout
+
+        def recv(self, size):
+            return b'{"result":{"type":"subscription_started"}}\n'
+
+        def setblocking(self, blocking):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    sock = HandshakeSocket()
+    ticks = iter([0.0, 1.0, 9.5, 9.6])
+    monkeypatch.setattr(herdr_socket.socket, "socket", lambda *args: sock)
+    monkeypatch.setattr(herdr_socket.time, "monotonic", lambda: next(ticks))
+
+    stream = EventStream(
+        [{"type": "pane.created"}],
+        socket_path="/unused.sock",
+        ack_timeout_s=10.0,
+    )
+    try:
+        assert sock.send_timeout == pytest.approx(0.5)
+    finally:
+        stream.close()
+
+
 def test_event_stream_buffers_partial_lines(server):
     stream = EventStream([{"type": "pane.created"}], socket_path=server.path)
     try:
