@@ -14,6 +14,7 @@ from .markers import MarkerStore
 
 _VERBS = {
     "hold": "holding",
+    "hold-pending": "verifying",
     "idle-meta": "labeling",
     "progress": "working",
     "done": "labeling",

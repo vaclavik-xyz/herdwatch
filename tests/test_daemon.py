@@ -388,6 +388,100 @@ def test_failed_report_is_not_throttled():
     assert "w1:p1" in d.managed
 
 
+def test_unverified_report_is_tracked_until_readback_confirms_hold():
+    client = FakeClient([_agent(status="idle")], report_ok=None)
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=0)
+    seed(d, client)
+
+    d._reprobe_sweep()
+
+    assert d.managed["w1:p1"].kind == "hold-pending"
+    assert d._rows()[0]["meta"] is False
+    assert client.releases == []
+
+    client.agents["w1:p1"].update(
+        agent_status="working", custom_status="⏳ review"
+    )
+    d._reprobe_sweep()
+    assert d.managed["w1:p1"].kind == "hold"
+
+    probe.result = None
+    d._reprobe_sweep()
+    assert client.releases == ["w1:p1"]
+    assert d.managed == {}
+
+
+def test_unverified_report_waits_when_readback_remains_unavailable():
+    client = FakeClient([_agent(status="idle")], report_ok=None)
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.set_agents([])
+
+    d._reprobe_sweep()
+
+    assert d.managed["w1:p1"].kind == "hold-pending"
+    assert client.releases == []
+
+
+def test_unverified_report_is_confirmed_by_matching_status_event():
+    client = FakeClient([_agent(status="idle")], report_ok=None)
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+
+    d.dispatch_event(_status_event(status="working", custom="⏳ review"))
+
+    assert d.managed["w1:p1"].kind == "hold"
+
+
+def test_shutdown_retains_unverified_hold_when_readback_is_unavailable():
+    snapshots = []
+    client = FakeClient([_agent(status="idle")], report_ok=None)
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+        on_snapshot=snapshots.append,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.set_agents([])
+
+    d.shutdown()
+
+    assert client.releases == []
+    assert d.managed["w1:p1"].kind == "hold-pending"
+    assert snapshots[-1][0]["meta"] is False
+
+
+def test_unverified_report_falls_back_when_foreign_owner_becomes_visible():
+    client = FakeClient([_agent(status="idle")], report_ok=None)
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.set_agents([_owned_agent()])
+
+    d._reprobe_sweep()
+
+    assert client.releases == []
+    assert client.metadata[-1] == ("w1:p1", "⏳ review", False, 1000)
+    assert d.managed["w1:p1"].kind == "idle-meta"
+
+
 def test_failed_work_cleared_release_is_not_throttled():
     now = [0.0]
     client = FakeClient([_agent(status="idle")], release_ok=False)

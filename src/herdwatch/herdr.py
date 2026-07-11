@@ -66,23 +66,34 @@ class HerdrClient:
         return agent if isinstance(agent, dict) else None
 
     def report_agent(self, pane_id: str, source: str, agent: str, state: str,
-                     custom_status: str | None = None) -> bool:
+                     custom_status: str | None = None) -> bool | None:
         params = {"pane_id": pane_id, "source": source, "agent": agent, "state": state}
         if custom_status:
             params["custom_status"] = custom_status
         try:
             self._call("pane.report_agent", params)
-        except (HerdrApiError, HerdrUnavailable) as exc:
+        except HerdrApiError as exc:
             log.warning("herdr pane.report_agent failed: %s", exc)
             return False
+        except HerdrUnavailable as exc:
+            # The transport can fail after send (for example while reading the
+            # response), so application is unknown until a later readback.
+            log.warning("herdr pane.report_agent outcome is unknown: %s", exc)
+            return None
 
         # Herdr <= 0.7.3 returns {"type": "ok"} even when its authority
         # arbitration silently discards the report. Read the effective state
         # back before telling the daemon that it owns a semantic assertion.
         observed = self.agent_get(pane_id)
+        if observed is None:
+            log.warning(
+                "herdr accepted pane.report_agent for %s but its applied "
+                "state could not be verified yet",
+                pane_id,
+            )
+            return None
         applied = (
-            observed is not None
-            and observed.get("agent") == agent
+            observed.get("agent") == agent
             and observed.get("agent_status") == state
             and (
                 custom_status is None

@@ -88,7 +88,10 @@ def test_report_agent_sends_params_and_maps_result():
         ("agent.get", {"target": "w1:p1"}, None),
     ]
     assert HerdrClient(request=FakeRequest({"pane.report_agent": HerdrUnavailable("x")})) \
-        .report_agent("w1:p1", "herdwatch", "claude", "working") is False
+        .report_agent("w1:p1", "herdwatch", "claude", "working") is None
+    assert HerdrClient(request=FakeRequest({
+        "pane.report_agent": HerdrApiError("invalid_params", "x")
+    })).report_agent("w1:p1", "herdwatch", "claude", "working") is False
 
 
 def test_report_agent_rejects_transport_ok_when_state_was_not_applied():
@@ -108,6 +111,20 @@ def test_report_agent_rejects_transport_ok_when_state_was_not_applied():
             "w1:p1", "herdwatch", "claude", "working", "⏳ CI"
         )
         is False
+    )
+
+
+def test_report_agent_returns_unknown_when_readback_is_unavailable():
+    req = FakeRequest({
+        "pane.report_agent": {"type": "ok"},
+        "agent.get": HerdrUnavailable("temporary read failure"),
+    })
+
+    assert (
+        HerdrClient(request=req).report_agent(
+            "w1:p1", "herdwatch", "claude", "working", "⏳ CI"
+        )
+        is None
     )
 
 

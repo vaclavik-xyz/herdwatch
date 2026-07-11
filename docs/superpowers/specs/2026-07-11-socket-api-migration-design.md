@@ -150,6 +150,9 @@ State:
   records the pane's **`terminal_id`** (from the registry record at assert
   time) for move reconciliation. `kind` gains a value:
   - `"hold"` — idle pane held `working` via `report_agent` (unchanged).
+  - `"hold-pending"` — `report_agent` returned success but its immediate
+    `agent.get` readback was unavailable; keep semantic cleanup ownership and
+    retry verification before either release or fallback.
   - `"idle-meta"` — herdr rejected a semantic hold because another source
     owns the official agent session; show TTL-backed metadata without ever
     releasing that foreign lifecycle owner.
@@ -170,9 +173,10 @@ Main loop (single thread):
    registry built from a pre-subscribe snapshot could go stale for up to a
    full resync. If B's pane set differs from A's, resubscribe with B and
    repeat. Adopt from the state file (same pid-liveness rule as today):
-   `"hold"` rows re-adopt as now; rows flagged `"meta": true` (written by
+   `"hold"`/`"hold-pending"` rows re-adopt as now; rows flagged `"meta": true` (written by
    this daemon generation for `idle-meta`/`progress`/`done` kinds) are **skipped** —
-   their metadata self-expires via TTL; **remaining non-`"hold"` rows
+   their metadata self-expires via TTL; **remaining rows outside
+   `"hold"`/`"hold-pending"` without the flag
    (pre-migration, no `meta` flag) go into a legacy-release set retried
    each reprobe sweep until `release_agent` confirms (success or
    `not_found`)** — they may come from a
@@ -317,11 +321,11 @@ TTL = `2 × reprobe_interval_s × 1000` ms, clamped to herdr's accepted
 request. Because metadata self-expires,
 `"idle-meta"`, `"progress"`, and `"done"` kinds are **not re-adopted** after a crash — TTL
 cleans up orphans, and the next event/resync re-asserts if still warranted.
-Only `"hold"` (a semantic assertion with no TTL) keeps the adopt path. All
+Only `"hold"`/`"hold-pending"` (semantic assertions with no TTL) keep the adopt path. All
 kinds stay in the state file so `herdwatch status` can show them.
 
-`herdwatch status` verb per kind: `holding` (hold), `working` (progress),
-`labeling` (idle-meta/done).
+`herdwatch status` verb per kind: `holding` (hold), `verifying`
+(hold-pending), `working` (progress), `labeling` (idle-meta/done).
 
 ## Error handling & recovery
 
@@ -339,7 +343,9 @@ kinds stay in the state file so `herdwatch status` can show them.
 - **Semantic report silently ignored** → `report_agent` reads back
   `agent_status`/`custom_status`; an official foreign `agent_session.source` is
   handled as metadata-only up front, so herdwatch never issues the dangerous
-  unmatched `release_agent` call.
+  unmatched `release_agent` call. If readback itself is unavailable, retain a
+  non-metadata `hold-pending` row and retry; never guess that the durable write
+  failed or release it before ownership is confirmed.
 - **`request()` failure** (herdr down/restarting) → same semantics as
   today's `rc != 0`: asserts aren't recorded, releases keep bookkeeping and
   retry; the failed pane's throttle is cleared so retry is prompt.
@@ -350,8 +356,10 @@ kinds stay in the state file so `herdwatch status` can show them.
 - **Missed events** (hub overflow, subscribe gaps) → covered by the resync
   timer and the reprobe sweep; correctness never depends on seeing every
   event.
-- **Clean shutdown** (SIGTERM/atexit): `release_agent` all `"hold"` panes
+- **Clean shutdown** (SIGTERM/atexit): `release_agent` all verified `"hold"` panes
   and `clear_custom_status` all `"idle-meta"`/`"progress"`/`"done"` panes.
+  A still-unverifiable `"hold-pending"` row remains persisted for retry after
+  restart rather than risking an orphan or a foreign-authority release.
 
 ## Config & compatibility
 

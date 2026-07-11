@@ -55,6 +55,7 @@ MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
 TTL_MIN_MS = 1000
 TTL_MAX_MS = 86_400_000
 LIFECYCLE_RESYNC_DEBOUNCE_S = 0.25
+SEMANTIC_HOLD_KINDS = {"hold", "hold-pending"}
 log = logging.getLogger(__name__)
 
 
@@ -62,7 +63,8 @@ log = logging.getLogger(__name__)
 class ManagedPane:
     custom_status: str
     agent: str
-    kind: str = "hold"  # "hold" | "idle-meta" | "progress" | "done"
+    # "hold" | "hold-pending" | "idle-meta" | "progress" | "done"
+    kind: str = "hold"
     terminal_id: str = ""
 
 
@@ -163,7 +165,7 @@ class Daemon:
                 "status": mp.custom_status,
                 "kind": mp.kind,
                 "terminal_id": mp.terminal_id,
-                "meta": mp.kind != "hold",
+                "meta": mp.kind not in SEMANTIC_HOLD_KINDS,
             }
             for pane_id, mp in sorted(self.managed.items())
         ]
@@ -204,7 +206,7 @@ class Daemon:
                 kind=row.get("kind", "hold"),
                 terminal_id=row.get("terminal_id", ""),
             )
-            if mp.kind == "hold":
+            if mp.kind in SEMANTIC_HOLD_KINDS:
                 self.managed[pane_id] = mp
                 self._adopted.add(pane_id)
             elif not row.get("meta"):
@@ -343,6 +345,10 @@ class Daemon:
                 status == expected
                 and (data.get("custom_status") or "") == mp.custom_status
             ):
+                if mp.kind == "hold-pending":
+                    mp.kind = "hold"
+                    self._adopted.discard(pane_id)
+                    log.info("verified pending hold %s from event", pane_id)
                 return  # ack of our own report/metadata write
         if mp is not None and mp.kind == "idle-meta" and status != "idle":
             if not self._clear_metadata(pane_id, f"left idle ({status})"):
@@ -431,7 +437,7 @@ class Daemon:
             self._legacy_release[new] = self._legacy_release.pop(old)
         mp = self.managed.get(new)
         if mp is not None and not self._eligible(new):
-            if mp.kind == "hold":
+            if mp.kind in SEMANTIC_HOLD_KINDS:
                 self._release_hold(new, "moved to ineligible pane")
             else:
                 self._clear_metadata(new, "moved to ineligible pane")
@@ -466,7 +472,7 @@ class Daemon:
                         or (
                             book is self.managed
                             and pane_id in self._adopted
-                            and mp.kind == "hold"
+                            and mp.kind in SEMANTIC_HOLD_KINDS
                         )
                     )
                 ):
@@ -497,7 +503,7 @@ class Daemon:
                 if book is self.managed:
                     self._adopted.discard(pane_id)
                     # best-effort cleanup; the pane is gone, drop regardless
-                    if mp.kind == "hold":
+                    if mp.kind in SEMANTIC_HOLD_KINDS:
                         self._client.release_agent(pane_id, SOURCE, mp.agent)
                     else:
                         self._client.report_metadata(
@@ -575,6 +581,14 @@ class Daemon:
             return owner
         return None
 
+    @staticmethod
+    def _record_matches_hold(rec: dict, mp: ManagedPane) -> bool:
+        return (
+            rec.get("agent") == mp.agent
+            and rec.get("agent_status") == "working"
+            and rec.get("custom_status") == mp.custom_status
+        )
+
     def _assert_hold(self, pane_id: str, agent: str, label: str) -> None:
         owner = self._foreign_session_owner(pane_id)
         if owner is not None:
@@ -586,9 +600,10 @@ class Daemon:
             )
             self._assert_metadata(pane_id, agent, label, "idle-meta")
             return
-        if self._client.report_agent(
+        outcome = self._client.report_agent(
             pane_id, SOURCE, agent, "working", label
-        ):
+        )
+        if outcome is True:
             self.managed[pane_id] = ManagedPane(
                 label,
                 agent,
@@ -597,6 +612,15 @@ class Daemon:
             )
             self._adopted.discard(pane_id)
             log.info("hold %s -> %s (%s)", pane_id, label, agent)
+        elif outcome is None:
+            self.managed[pane_id] = ManagedPane(
+                label,
+                agent,
+                kind="hold-pending",
+                terminal_id=self._terminal_id(pane_id),
+            )
+            self._last_probe.pop(pane_id, None)
+            log.warning("hold %s is awaiting readback verification", pane_id)
         else:
             # Do not record a failed write, and let the next sweep retry now.
             self._last_probe.pop(pane_id, None)
@@ -627,6 +651,28 @@ class Daemon:
         mp = self.managed.get(pane_id)
         if mp is None:
             return True
+        if mp.kind == "hold-pending":
+            observed = self._client.agent_get(pane_id)
+            if observed is None:
+                self._last_probe.pop(pane_id, None)
+                log.warning(
+                    "cannot verify pending hold %s for cleanup yet; keeping "
+                    "it to retry",
+                    pane_id,
+                )
+                return False
+            self._registry[pane_id] = observed
+            self._remember_record(observed)
+            if not self._record_matches_hold(observed, mp):
+                del self.managed[pane_id]
+                self._adopted.discard(pane_id)
+                log.info(
+                    "dropping rejected pending hold %s without release (%s)",
+                    pane_id,
+                    reason,
+                )
+                return True
+            mp.kind = "hold"
         owner = self._foreign_session_owner(pane_id)
         if owner is not None:
             # A visible foreign session proves our custom source is not the
@@ -721,17 +767,30 @@ class Daemon:
         if last is not None and (now - last) < self._reprobe:
             return
 
+        mp = self.managed.get(pane_id)
         rec = self._client.agent_get(pane_id)
         if rec is not None:
             self._registry[pane_id] = rec
             self._remember_record(rec)
         else:
+            if mp is not None and mp.kind == "hold-pending":
+                self._last_probe.pop(pane_id, None)
+                return
             rec = self._registry.get(pane_id)
             if rec is None:
                 return
 
         status = rec.get("agent_status") or "unknown"
-        mp = self.managed.get(pane_id)
+        if mp is not None and mp.kind == "hold-pending":
+            if self._record_matches_hold(rec, mp):
+                mp.kind = "hold"
+                self._adopted.discard(pane_id)
+                log.info("verified pending hold %s", pane_id)
+            else:
+                del self.managed[pane_id]
+                self._adopted.discard(pane_id)
+                mp = None
+                log.info("pending hold %s was not applied", pane_id)
         if mp is not None and mp.kind == "progress":
             # Recover from a missed working-to-idle/done event.
             if status != "working":
@@ -822,7 +881,7 @@ class Daemon:
             if mp is None:
                 continue
             if not self._eligible(pane_id):
-                if mp.kind == "hold":
+                if mp.kind in SEMANTIC_HOLD_KINDS:
                     self._release_hold(pane_id, "pane no longer eligible")
                 else:
                     self._clear_metadata(pane_id, "pane no longer eligible")
@@ -883,7 +942,7 @@ class Daemon:
         """Clean up owned assertions, retaining rows for failed hold cleanup."""
         for pane_id, mp in list(self.managed.items()):
             try:
-                if mp.kind == "hold":
+                if mp.kind in SEMANTIC_HOLD_KINDS:
                     self._release_hold(pane_id, "shutdown")
                 else:
                     # Metadata self-expires via TTL; drop the row either way.

@@ -84,6 +84,12 @@ def test_status_prints_kind_verbs(monkeypatch, capsys):
                 "status": "⏳ CI",
                 "kind": "idle-meta",
             },
+            {
+                "pane_id": "w5:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold-pending",
+            },
         ]
 
     class Store:
@@ -103,6 +109,7 @@ def test_status_prints_kind_verbs(monkeypatch, capsys):
     assert "working w2:p1" in out
     assert "labeling w3:p1" in out
     assert "labeling w4:p1" in out
+    assert "verifying w5:p1" in out
 
 
 def test_status_lists_markers_and_panes(tmp_path, monkeypatch, capsys):
