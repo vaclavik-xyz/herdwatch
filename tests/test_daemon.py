@@ -1955,6 +1955,21 @@ def test_resync_keeps_state_and_retries_malformed_snapshot():
     assert d._resync_due is True
 
 
+def test_resync_keeps_state_and_retries_malformed_snapshot_panes():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(client)
+    seed(d, client)
+    client.session_snapshot = lambda: {
+        "agents": [_agent(status="idle")],
+        "panes": [{"pane_id": ["w1:p1"]}],
+    }
+
+    assert d._resync() is False
+
+    assert "w1:p1" in d._registry
+    assert d._resync_due is True
+
+
 def test_resync_logs_old_server_and_keeps_state(caplog):
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(
@@ -2309,6 +2324,22 @@ def test_bootstrap_closes_stream_when_snapshot_agents_are_malformed():
     assert d.bootstrap() is False
     assert stream.closed is True
     assert d._stream is None
+
+
+def test_bootstrap_rejects_malformed_initial_snapshot_panes():
+    client = FakeClient([])
+    factories = []
+    client.session_snapshot = lambda: {
+        "agents": [],
+        "panes": [{"pane_id": ["w1:p1"]}],
+    }
+    d = make_daemon(
+        client,
+        stream_factory=lambda subs: factories.append(subs) or FakeStream(subs),
+    )
+
+    assert d.bootstrap() is False
+    assert factories == []
 
 
 class Stop(BaseException):

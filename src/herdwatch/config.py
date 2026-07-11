@@ -19,7 +19,7 @@ _MAX_RUNTIME_INTERVAL_S = 43_200.0
 
 def _positive_interval(value, default: float, key: str) -> float:
     try:
-        interval = float(value)
+        interval = math.nan if isinstance(value, bool) else float(value)
     except (TypeError, ValueError):
         interval = math.nan
     if (

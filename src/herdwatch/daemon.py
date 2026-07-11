@@ -250,13 +250,25 @@ class Daemon:
         agents. Falling back to agents keeps transport fakes and older recorded
         fixtures useful without weakening the live behavior.
         """
-        panes = snapshot.get("panes")
-        rows = panes if isinstance(panes, list) else snapshot.get("agents", [])
-        return {
-            row["pane_id"]
-            for row in rows
-            if isinstance(row, dict) and row.get("pane_id")
-        }
+        field = "panes" if "panes" in snapshot else "agents"
+        rows = snapshot.get(field)
+        if not isinstance(rows, list):
+            raise HerdrUnavailable(
+                f"session.snapshot {field} field must be a list"
+            )
+        pane_ids = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise HerdrUnavailable(
+                    f"session.snapshot {field} entries must be objects"
+                )
+            pane_id = row.get("pane_id")
+            if not isinstance(pane_id, str) or not pane_id:
+                raise HerdrUnavailable(
+                    f"session.snapshot {field} pane_id must be a string"
+                )
+            pane_ids.add(pane_id)
+        return pane_ids
 
     @staticmethod
     def _snapshot_agent_records(snapshot: dict) -> dict[str, dict]:
@@ -321,6 +333,7 @@ class Daemon:
         for _ in range(5):
             try:
                 snapshot = self._client.session_snapshot()
+                pane_ids = self._snapshot_pane_ids(snapshot)
             except HerdrApiError as exc:
                 self._log_boot_failure(
                     "herdwatch requires herdr >= 0.7.2 with "
@@ -331,7 +344,6 @@ class Daemon:
             except HerdrUnavailable as exc:
                 self._log_boot_failure(f"herdr unreachable: {exc}")
                 return False
-            pane_ids = self._snapshot_pane_ids(snapshot)
             try:
                 stream = self._stream_factory(
                     self._subscriptions_for(sorted(pane_ids))
@@ -348,11 +360,12 @@ class Daemon:
             try:
                 snapshot = self._client.session_snapshot()
                 records = self._snapshot_agent_records(snapshot)
+                subscribed_pane_ids = self._snapshot_pane_ids(snapshot)
             except (HerdrApiError, HerdrUnavailable) as exc:
                 log.warning("bootstrap: post-subscribe snapshot failed: %s", exc)
                 stream.close()
                 return False
-            if self._snapshot_pane_ids(snapshot) != pane_ids:
+            if subscribed_pane_ids != pane_ids:
                 stream.close()
                 continue
             self._stream = stream
@@ -801,6 +814,7 @@ class Daemon:
         try:
             snap = self._client.session_snapshot()
             records = self._snapshot_agent_records(snap)
+            subscribed_pane_ids = self._snapshot_pane_ids(snap)
         except HerdrApiError as exc:
             log.error(
                 "herdwatch requires herdr >= 0.7.2 with session.snapshot "
@@ -812,7 +826,6 @@ class Daemon:
             log.warning("resync skipped, herdr unreachable: %s", exc)
             self._schedule_resync()
             return False
-        subscribed_pane_ids = self._snapshot_pane_ids(snap)
         by_terminal = {
             a["terminal_id"]: pid
             for pid, a in records.items()

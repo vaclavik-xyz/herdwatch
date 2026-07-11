@@ -1,3 +1,5 @@
+import pytest
+
 from herdwatch.config import load
 
 
@@ -171,6 +173,31 @@ def test_excessive_intervals_use_safe_defaults(tmp_path, caplog):
     assert cfg.resync_interval_s == 60.0
     assert cfg.reprobe_interval_s == 15.0
     assert cfg.progress_interval_s == 4.0
+
+
+@pytest.mark.parametrize("literal", ["true", "false"])
+def test_boolean_intervals_use_safe_defaults(tmp_path, caplog, literal):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        "[daemon]\n"
+        f"resync_interval_s = {literal}\n"
+        f"reprobe_interval_s = {literal}\n"
+        "[progress]\n"
+        f"interval_s = {literal}\n"
+    )
+
+    with caplog.at_level("WARNING"):
+        cfg = load(path=str(p))
+
+    assert cfg.resync_interval_s == 60.0
+    assert cfg.reprobe_interval_s == 15.0
+    assert cfg.progress_interval_s == 4.0
+    warnings = [
+        r
+        for r in caplog.records
+        if "must be a finite positive number" in r.message
+    ]
+    assert len(warnings) == 3
 
 
 def test_poll_interval_is_ignored_with_warning(tmp_path, caplog):
