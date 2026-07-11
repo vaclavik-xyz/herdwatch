@@ -46,7 +46,15 @@ class HerdrClient:
             return False
 
     def session_snapshot(self) -> dict:
-        return self._call("session.snapshot", {})
+        result = self._call("session.snapshot", {})
+        if not isinstance(result, dict):
+            raise HerdrUnavailable("session.snapshot result must be an object")
+        snapshot = result.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise HerdrUnavailable(
+                "session.snapshot result is missing the snapshot object"
+            )
+        return snapshot
 
     def agent_get(self, pane_id: str) -> dict | None:
         try:

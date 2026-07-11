@@ -13,7 +13,7 @@ class FakeRequest:
         self.calls = []
 
     def __call__(self, method, params, *, socket_path=None, timeout_s=10.0):
-        self.calls.append((method, params))
+        self.calls.append((method, params, socket_path))
         outcome = self.results.get(method, {})
         if isinstance(outcome, Exception):
             raise outcome
@@ -21,9 +21,25 @@ class FakeRequest:
 
 
 def test_session_snapshot_returns_result():
-    req = FakeRequest({"session.snapshot": {"agents": [{"pane_id": "w1:p1"}]}})
-    c = HerdrClient(request=req)
+    req = FakeRequest({"session.snapshot": {
+        "type": "session_snapshot",
+        "snapshot": {"agents": [{"pane_id": "w1:p1"}]},
+    }})
+    c = HerdrClient(socket_path="/tmp/herdr.sock", request=req)
     assert c.session_snapshot() == {"agents": [{"pane_id": "w1:p1"}]}
+    assert req.calls == [("session.snapshot", {}, "/tmp/herdr.sock")]
+
+
+@pytest.mark.parametrize("result", [
+    {},
+    {"type": "session_snapshot"},
+    {"type": "session_snapshot", "snapshot": None},
+    {"type": "session_snapshot", "snapshot": []},
+])
+def test_session_snapshot_rejects_invalid_result_shape(result):
+    c = HerdrClient(request=FakeRequest({"session.snapshot": result}))
+    with pytest.raises(HerdrUnavailable, match="snapshot"):
+        c.session_snapshot()
 
 
 def test_session_snapshot_propagates_errors():
@@ -38,7 +54,7 @@ def test_session_snapshot_propagates_errors():
 def test_agent_get_returns_record_and_none_on_failure():
     req = FakeRequest({"agent.get": {"agent": {"pane_id": "w1:p1", "agent_status": "idle"}}})
     assert HerdrClient(request=req).agent_get("w1:p1") == {"pane_id": "w1:p1", "agent_status": "idle"}
-    assert req.calls == [("agent.get", {"target": "w1:p1"})]
+    assert req.calls == [("agent.get", {"target": "w1:p1"}, None)]
     assert HerdrClient(request=FakeRequest({"agent.get": HerdrUnavailable("down")})).agent_get("w1:p1") is None
     assert HerdrClient(request=FakeRequest({"agent.get": HerdrApiError("not_found", "x")})).agent_get("w1:p1") is None
 
@@ -49,7 +65,7 @@ def test_report_agent_sends_params_and_maps_result():
     assert c.report_agent("w1:p1", "herdwatch", "claude", "working", "⏳ CI") is True
     assert req.calls == [("pane.report_agent",
                           {"pane_id": "w1:p1", "source": "herdwatch", "agent": "claude",
-                           "state": "working", "custom_status": "⏳ CI"})]
+                           "state": "working", "custom_status": "⏳ CI"}, None)]
     assert HerdrClient(request=FakeRequest({"pane.report_agent": HerdrUnavailable("x")})) \
         .report_agent("w1:p1", "herdwatch", "claude", "working") is False
 
@@ -80,11 +96,11 @@ def test_report_metadata_set_and_clear():
                              custom_status="⏳ CI", ttl_ms=30000) is True
     assert req.calls[-1] == ("pane.report_metadata",
                              {"pane_id": "w1:p1", "source": "herdwatch", "agent": "claude",
-                              "custom_status": "⏳ CI", "ttl_ms": 30000})
+                              "custom_status": "⏳ CI", "ttl_ms": 30000}, None)
     assert c.report_metadata("w1:p1", "herdwatch", clear_custom_status=True) is True
     assert req.calls[-1] == ("pane.report_metadata",
                              {"pane_id": "w1:p1", "source": "herdwatch",
-                              "clear_custom_status": True})
+                              "clear_custom_status": True}, None)
 
 
 def test_report_metadata_not_found_true_only_for_clear():
