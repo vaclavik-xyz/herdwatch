@@ -1770,6 +1770,27 @@ def test_unknown_pane_event_schedules_resync():
     assert d._resync_due is True
 
 
+def test_malformed_pane_ids_do_not_block_following_events():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+
+    d.dispatch_event(_status_event(pane=["bad"], status="idle"))
+    d.dispatch_event(
+        {
+            "event": "pane.agent_detected",
+            "data": {"pane_id": ["bad"], "agent": "claude"},
+        }
+    )
+    d.dispatch_event(_status_event(status="idle"))
+
+    assert client.reports == [("w1:p1", "working", "⏳ review")]
+
+
 def test_lifecycle_event_schedules_resync():
     d = make_daemon(FakeClient([]))
     d.dispatch_event(
@@ -2397,6 +2418,19 @@ def test_resync_failure_retries_lifecycle_intent_after_debounce():
     assert d._resync_not_before == 10.25
     assert d._resync_ready(10.24) is False
     assert d._resync_ready(10.25) is True
+
+
+def test_resync_retries_transient_api_error_after_debounce():
+    now = [10.0]
+    client = FakeClient([])
+    client.snapshot_error = HerdrApiError("internal_error", "restarting")
+    d = make_daemon(client, clock=lambda: now[0])
+    d._schedule_resync(debounce=False)
+
+    assert d._resync() is False
+
+    assert d._resync_due is True
+    assert d._resync_not_before == 10.25
 
 
 def test_resync_keeps_state_and_retries_malformed_snapshot():

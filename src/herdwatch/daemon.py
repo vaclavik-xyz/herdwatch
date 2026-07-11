@@ -428,7 +428,9 @@ class Daemon:
             self._on_pane_moved(data)
         elif kind in ("pane.agent_detected", "pane_agent_detected"):
             pane_id = data.get("pane_id")
-            current = self._registry.get(pane_id) if pane_id else None
+            if not isinstance(pane_id, str) or not pane_id:
+                return
+            current = self._registry.get(pane_id)
             detected = data.get("agent")
             if current is not None and (
                 not detected or detected == current.get("agent")
@@ -440,7 +442,11 @@ class Daemon:
 
     def _on_status_event(self, data: dict) -> None:
         pane_id = data.get("pane_id")
-        if not pane_id or not self._eligible(pane_id):
+        if (
+            not isinstance(pane_id, str)
+            or not pane_id
+            or not self._eligible(pane_id)
+        ):
             return
         rec = self._registry.get(pane_id)
         if rec is None:
@@ -865,11 +871,15 @@ class Daemon:
             records = self._snapshot_agent_records(snap)
             subscribed_pane_ids = self._snapshot_pane_ids(snap)
         except HerdrApiError as exc:
-            log.error(
-                "herdwatch requires herdr >= 0.7.2 with session.snapshot "
-                "(server said: %s)",
-                exc,
-            )
+            if exc.code == "unknown_method":
+                log.error(
+                    "herdwatch requires herdr >= 0.7.2 with "
+                    "session.snapshot (server said: %s)",
+                    exc,
+                )
+            else:
+                log.warning("resync skipped after herdr API error: %s", exc)
+                self._schedule_resync()
             return False
         except HerdrUnavailable as exc:
             log.warning("resync skipped, herdr unreachable: %s", exc)
