@@ -334,6 +334,21 @@ def _stream_with_chunks(*chunks):
     return stream
 
 
+@pytest.mark.parametrize("closed", [False, True])
+def test_event_stream_skips_nonobject_json_without_losing_next_event(closed):
+    valid = {"event": "pane.created", "data": {"type": "pane_created"}}
+    invalid = b'[]\nnull\n{"event":[]}\n{"event":"bad","data":[1]}\n'
+    payload = invalid + json.dumps(valid).encode() + b"\n"
+    if closed:
+        stream = _stream_with_chunks()
+        stream.closed = True
+        stream._buf = payload
+    else:
+        stream = _stream_with_chunks(payload)
+
+    assert stream.read_events() == [valid]
+
+
 def test_event_stream_subscribes_and_receives(server):
     stream = EventStream([{"type": "pane.created"}], socket_path=server.path)
     try:

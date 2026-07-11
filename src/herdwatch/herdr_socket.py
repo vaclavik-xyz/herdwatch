@@ -26,6 +26,19 @@ def _first_line_exceeds_limit(buf: bytes) -> bool:
     return length > _MAX_RESPONSE_SIZE
 
 
+def _parse_event_line(line: bytes) -> dict | None:
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+        return None
+    data = event.get("data")
+    if data is not None and not isinstance(data, dict):
+        return None
+    return event
+
+
 class HerdrUnavailable(Exception):
     """herdr server unreachable: connect failure, timeout, or EOF."""
 
@@ -235,10 +248,9 @@ class EventStream:
                         return events
                     if not line.strip():
                         continue
-                    try:
-                        events.append(json.loads(line))
-                    except ValueError:
-                        pass  # skip malformed line, keep the stream alive
+                    event = _parse_event_line(line)
+                    if event is not None:
+                        events.append(event)
                 # The loop above drained every complete line, so only an
                 # incomplete suffix remains. Bound it without raising; the
                 # daemon reconnects when it observes `closed`.
@@ -256,10 +268,9 @@ class EventStream:
                 break
             if not line.strip():
                 continue
-            try:
-                events.append(json.loads(line))
-            except ValueError:
-                pass  # skip malformed line, keep the stream alive
+            event = _parse_event_line(line)
+            if event is not None:
+                events.append(event)
         # Final check: discard any remaining oversized incomplete suffix
         if len(self._buf) > _MAX_RESPONSE_SIZE:
             self.closed = True
