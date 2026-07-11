@@ -1926,7 +1926,9 @@ def test_resync_keeps_state_and_retries_malformed_snapshot():
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(client)
     seed(d, client)
-    client.session_snapshot = lambda: {"agents": "invalid"}
+    client.session_snapshot = lambda: {
+        "agents": [{"pane_id": "w1:p1", "agent_session": [1]}]
+    }
 
     assert d._resync() is False
 
@@ -2274,7 +2276,12 @@ def test_bootstrap_closes_stream_when_snapshot_agents_are_malformed():
     snapshots = iter(
         [
             {"agents": [], "panes": []},
-            {"agents": [None], "panes": []},
+            {
+                "agents": [
+                    {"pane_id": "w1:p1", "terminal_id": [1]}
+                ],
+                "panes": [],
+            },
         ]
     )
     client.session_snapshot = lambda: next(snapshots)

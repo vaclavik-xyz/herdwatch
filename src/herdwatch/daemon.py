@@ -276,6 +276,41 @@ class Daemon:
                 raise HerdrUnavailable(
                     "session.snapshot agent pane_id must be a string"
                 )
+            terminal_id = agent.get("terminal_id")
+            if terminal_id is not None and (
+                not isinstance(terminal_id, str) or not terminal_id
+            ):
+                raise HerdrUnavailable(
+                    "session.snapshot agent terminal_id must be a nonempty "
+                    "string or null"
+                )
+            for field in (
+                "agent",
+                "agent_status",
+                "cwd",
+                "foreground_cwd",
+                "custom_status",
+            ):
+                value = agent.get(field)
+                if value is not None and not isinstance(value, str):
+                    raise HerdrUnavailable(
+                        f"session.snapshot agent {field} must be a string "
+                        "or null"
+                    )
+            session = agent.get("agent_session")
+            if session is not None and not isinstance(session, dict):
+                raise HerdrUnavailable(
+                    "session.snapshot agent agent_session must be an object "
+                    "or null"
+                )
+            if isinstance(session, dict):
+                for field in ("source", "agent", "kind", "value"):
+                    value = session.get(field)
+                    if value is not None and not isinstance(value, str):
+                        raise HerdrUnavailable(
+                            "session.snapshot agent agent_session."
+                            f"{field} must be a string or null"
+                        )
             records[pane_id] = agent
         return records
 
