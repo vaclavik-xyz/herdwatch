@@ -691,6 +691,22 @@ def test_failed_work_cleared_release_is_not_throttled():
     assert "w1:p1" not in d.managed
 
 
+def test_reprobe_defers_hold_release_when_pane_id_is_reused():
+    client = FakeClient([_agent(status="idle", term="term-original")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=0)
+    seed(d, client)
+    d._reprobe_sweep()
+    probe.result = None
+    client.set_agents([_agent(status="idle", term="term-reused")])
+
+    d._reprobe_sweep()
+
+    assert client.releases == []
+    assert d.managed["w1:p1"].terminal_id == "term-original"
+    assert d._resync_due is True
+
+
 def test_reprobe_sweep_snapshots_managed_rows():
     client = FakeClient([_agent(status="idle")])
     snaps = []
@@ -1258,6 +1274,30 @@ def test_legacy_cleanup_drops_foreign_session_without_release():
 
     assert client.releases == []
     assert d._legacy_release == {}
+
+
+def test_legacy_cleanup_defers_release_when_pane_id_is_reused():
+    client = FakeClient([_agent(status="idle", term="term-original")])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+                "terminal_id": "term-original",
+            }
+        ]
+    )
+    seed(d, client)
+    client.set_agents([_agent(status="idle", term="term-reused")])
+
+    d._reprobe_sweep()
+
+    assert client.releases == []
+    assert d._legacy_release["w1:p1"].terminal_id == "term-original"
+    assert d._resync_due is True
 
 
 def test_shutdown_refreshes_owner_before_legacy_cleanup():

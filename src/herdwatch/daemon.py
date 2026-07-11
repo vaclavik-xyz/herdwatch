@@ -460,6 +460,14 @@ class Daemon:
         self._remember_record(observed)
         status = observed.get("agent_status") or "unknown"
         mp = self.managed.get(pane_id)
+        if (
+            mp is not None
+            and mp.terminal_id
+            and not self._record_matches_terminal(observed, mp)
+        ):
+            self._last_probe.pop(pane_id, None)
+            self._schedule_resync(debounce=False)
+            return
         if mp is not None:
             expected = {
                 "done": "done",
@@ -916,23 +924,24 @@ class Daemon:
             self._last_probe.pop(pane_id, None)
 
     def _release_hold(
-        self, pane_id: str, reason: str, *, refresh: bool = False
+        self, pane_id: str, reason: str, *, require_terminal: bool = False
     ) -> bool:
         mp = self.managed.get(pane_id)
         if mp is None:
             return True
-        observed = None
-        if refresh or mp.kind == "hold-pending":
-            observed = self._readback_record(pane_id)
-            if observed is None:
-                self._last_probe.pop(pane_id, None)
-                log.warning(
-                    "cannot verify hold %s for cleanup yet; keeping it to "
-                    "retry",
-                    pane_id,
-                )
-                return False
-        if refresh and not self._record_matches_terminal(observed, mp):
+        observed = self._readback_record(pane_id)
+        if observed is None:
+            self._last_probe.pop(pane_id, None)
+            log.warning(
+                "cannot verify hold %s for cleanup yet; keeping it to retry",
+                pane_id,
+            )
+            return False
+        if (
+            require_terminal or bool(mp.terminal_id)
+        ) and not self._record_matches_terminal(observed, mp):
+            self._last_probe.pop(pane_id, None)
+            self._schedule_resync(debounce=False)
             log.warning(
                 "cannot verify hold %s terminal identity for cleanup; "
                 "keeping it to retry",
@@ -1102,6 +1111,15 @@ class Daemon:
             if rec is None:
                 return False
 
+        if (
+            mp is not None
+            and mp.terminal_id
+            and not self._record_matches_terminal(rec, mp)
+        ):
+            self._last_probe.pop(pane_id, None)
+            self._schedule_resync(debounce=False)
+            return False
+
         status = rec.get("agent_status") or "unknown"
         if mp is not None and mp.kind == "hold-pending":
             if self._record_matches_hold(rec, mp):
@@ -1217,6 +1235,29 @@ class Daemon:
                     self._publish()
                     return
                 continue
+            observed = self._readback_record(pane_id)
+            if observed is None:
+                log.warning(
+                    "cannot verify legacy cleanup %s; keeping it to retry",
+                    pane_id,
+                )
+                if not yield_now():
+                    self._publish()
+                    return
+                continue
+            if mp.terminal_id and not self._record_matches_terminal(
+                observed, mp
+            ):
+                self._schedule_resync(debounce=False)
+                log.warning(
+                    "cannot verify legacy cleanup %s terminal identity; "
+                    "keeping it to retry",
+                    pane_id,
+                )
+                if not yield_now():
+                    self._publish()
+                    return
+                continue
             owner = self._foreign_session_owner(pane_id)
             if owner is not None:
                 del self._legacy_release[pane_id]
@@ -1326,7 +1367,9 @@ class Daemon:
         for pane_id, mp in list(self.managed.items()):
             try:
                 if mp.kind in SEMANTIC_HOLD_KINDS:
-                    self._release_hold(pane_id, "shutdown", refresh=True)
+                    self._release_hold(
+                        pane_id, "shutdown", require_terminal=True
+                    )
                 else:
                     # Metadata self-expires via TTL; drop the row either way.
                     self._client.report_metadata(
