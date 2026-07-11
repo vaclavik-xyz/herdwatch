@@ -1180,7 +1180,7 @@ def test_shutdown_releases_holds_and_clears_metadata():
     assert d.managed == {}
 ```
 
-Additionally port these existing tests 1:1 with the mechanical rule above (same asserts, new entry points): `test_context_carries_worktree_heads_to_probes`, `test_ignores_working_pane_not_managed`, `test_holds_idle_pane_after_it_was_done` (done leg now asserts `client.metadata == []` because no pendings — use `StaticProbe(None)` for the done tick, then set the pending and go idle), `test_releases_when_cleared`, `test_reasserts_only_on_label_change`, `test_raising_probe_does_not_crash_tick` (rename `_sweep`), `test_reprobe_throttle_skips_within_interval`, `test_managed_pane_released_when_cleared_even_if_status_working` (set registry status to "working" via `d._registry["w1:p1"]["agent_status"] = "working"` before the second sweep), `test_deny_skips_pane`, `test_allow_only_listed`, `test_unmanaged_idle_pane_is_throttled`, `test_failed_release_keeps_pane_for_retry` (vanish leg moves to Task 7's resync tests — here keep the pane present and only assert failed-release retention on work-cleared), `test_failed_report_does_not_record_managed`, `test_failed_report_is_not_throttled`, `test_failed_work_cleared_release_is_not_throttled`, `test_tick_snapshots_managed_rows` (assert the new row shape with `terminal_id`/`meta`), `test_tick_snapshots_empty_when_nothing_held`, `test_release_all_snapshots_empty` (`shutdown`), `test_raising_snapshot_does_not_crash_tick`, `test_adopt_ignores_rows_without_pane_id`, `test_adopt_defaults_kind_to_hold`, `test_adopted_pane_released_when_work_already_cleared`, `test_adopted_pane_kept_when_still_pending`, `test_adopted_pending_pane_is_reasserted_once`, `test_progress_uses_cached_session_when_working_omits_it` (idle leg via `_reprobe_sweep`, working leg via `_progress_sweep`), `test_progress_skipped_when_session_never_seen`, `test_progress_skips_non_claude_agents`, `test_progress_disabled_leaves_working_panes_alone`, `test_progress_reader_exception_is_contained`, `test_build_daemon_constructs` (moves to Task 9 — delete here, re-added there). Delete: `test_releases_assertion_when_pane_vanishes`, `test_session_cache_dropped_when_pane_vanishes`, `test_adopted_pane_gone_is_released_on_restart` (all re-created as resync tests in Task 7), `test_progress_released_when_detection_says_stopped`, `test_progress_hands_over_to_hold_in_same_tick`, `test_progress_released_when_blocked`, `test_progress_stop_falls_through_despite_stale_reprobe_timer` (re-created as event tests in Task 6), `test_progress_released_when_explain_fails` (behavior deleted).
+Additionally port these existing tests 1:1 with the mechanical rule above (same asserts, new entry points): `test_context_carries_worktree_heads_to_probes`, `test_ignores_working_pane_not_managed`, `test_holds_idle_pane_after_it_was_done` (done leg now asserts `client.metadata == []` because no pendings — use `StaticProbe(None)` for the done tick, then set the pending and go idle), `test_releases_when_cleared`, `test_reasserts_only_on_label_change`, `test_raising_probe_does_not_crash_tick` (rename `_sweep`), `test_reprobe_throttle_skips_within_interval`, `test_managed_pane_released_when_cleared_even_if_status_working` (set registry status to "working" via `d._registry["w1:p1"]["agent_status"] = "working"` before the second sweep), `test_deny_skips_pane`, `test_allow_only_listed`, `test_unmanaged_idle_pane_is_throttled`, `test_failed_release_keeps_pane_for_retry` (vanish leg moves to Task 7's resync tests — here keep the pane present and only assert failed-release retention on work-cleared), `test_failed_report_does_not_record_managed`, `test_failed_report_is_not_throttled`, `test_failed_work_cleared_release_is_not_throttled`, `test_tick_snapshots_managed_rows` (assert the new row shape with `terminal_id`/`meta`), `test_tick_snapshots_empty_when_nothing_held`, `test_release_all_snapshots_empty` (`shutdown`), `test_raising_snapshot_does_not_crash_tick`, `test_adopt_ignores_rows_without_pane_id`, `test_adopt_defaults_kind_to_hold`, `test_adopted_pane_released_when_work_already_cleared`, `test_adopted_pane_kept_when_still_pending`, `test_adopted_pending_pane_is_reasserted_once`, `test_progress_uses_cached_session_when_working_omits_it` (idle leg via `_reprobe_sweep`, working leg via `_progress_sweep`), `test_progress_skipped_when_session_never_seen`, `test_progress_skips_non_claude_agents`, `test_progress_disabled_leaves_working_panes_alone`, `test_progress_reader_exception_is_contained` — **for every ported progress test, the assertion target changes from `client.reports` to `client.metadata`** (progress labels are metadata writes now; e.g. the cached-session test ends with `assert client.metadata == [("w1:p1", "2/5 c00b", False, 30000)]` and `assert client.reports == []`), `test_build_daemon_constructs` (moves to Task 9 — delete here, re-added there). Delete: `test_releases_assertion_when_pane_vanishes`, `test_session_cache_dropped_when_pane_vanishes`, `test_adopted_pane_gone_is_released_on_restart` (all re-created as resync tests in Task 7), `test_progress_released_when_detection_says_stopped`, `test_progress_hands_over_to_hold_in_same_tick`, `test_progress_released_when_blocked`, `test_progress_stop_falls_through_despite_stale_reprobe_timer` (re-created as event tests in Task 6), `test_progress_released_when_explain_fails` (behavior deleted).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2133,22 +2133,28 @@ def test_bootstrap_subscribes_then_snapshots():
 
 
 def test_bootstrap_retries_when_pane_set_drifts():
-    # snapshot B sees a different pane set than A -> resubscribe with B's set
-    client = FakeClient([_agent(status="idle")])
+    # snapshot A sees one pane, snapshot B two -> resubscribe with B's set
+    client = FakeClient([])
     calls = {"n": 0}
-    real_snapshot = client.session_snapshot
+    made = []
 
     def drifting_snapshot():
         calls["n"] += 1
-        if calls["n"] == 2:                  # B differs from A once
-            return {"agents": [_agent(), _agent(pane="w2:p1")]}
-        return real_snapshot()
+        if calls["n"] == 1:                  # A: stale single-pane view
+            return {"agents": [_agent()]}
+        return {"agents": [_agent(), _agent(pane="w2:p1")]}
 
     client.session_snapshot = drifting_snapshot
-    client.set_agents([_agent(), _agent(pane="w2:p1")])
-    d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
+
+    def factory(subs):
+        made.append(subs)
+        return FakeStream(subs)
+
+    d = make_daemon(client, stream_factory=factory)
     assert d.bootstrap() is True
     assert set(d._registry) == {"w1:p1", "w2:p1"}
+    per_pane = [s["pane_id"] for s in made[-1] if "pane_id" in s]
+    assert per_pane == ["w1:p1", "w2:p1"]    # resubscribed with the full set
 
 
 def test_bootstrap_fails_when_unavailable():
@@ -2182,35 +2188,38 @@ def test_bootstrap_subscribe_rejection_retries_with_fresh_set():
     assert attempts["n"] == 2
 
 
+class Stop(Exception):
+    pass
+
+
+def _stop_sleep(_):
+    raise Stop()
+
+
 def test_run_processes_event_then_stops():
-    client = FakeClient([_agent(status="working")])
+    # NOTE: sel.select() sleeps REAL seconds while the clock is fake, so
+    # every interval must be tiny or the test wall-blocks on the timeout.
+    client = FakeClient([_agent(status="idle")])
     probe = StaticProbe(Pending("review", 30, "roborev"))
     stream = FakeStream()
-    d = make_daemon(client, [probe], stream_factory=lambda subs: stream)
-
-    class Stop(Exception):
-        pass
-
-    ticks = {"n": 0}
-
-    def fake_sleep(_):
-        raise Stop()                          # backoff would spin: bail out
-
-    client.agents["w1:p1"]["agent_status"] = "idle"
+    d = make_daemon(client, [probe], stream_factory=lambda subs: stream,
+                    reprobe_interval_s=0.001, resync_interval_s=0.001,
+                    progress_interval_s=0.001)
     stream.feed(_status_event(status="idle"))
+    ticks = {"n": 0}
 
     def clock():
         ticks["n"] += 1
-        if ticks["n"] > 40:                   # safety: end the loop
+        if ticks["n"] > 200:                  # end the loop via the handler
             raise Stop()
-        return float(ticks["n"])
+        return float(ticks["n"]) * 0.001
 
     d._clock = clock
     try:
-        d.run(sleep=fake_sleep)
+        d.run(sleep=_stop_sleep)              # handler's sleep raises Stop
     except Stop:
         pass
-    assert client.reports == [("w1:p1", "working", "⏳ review")]
+    assert ("w1:p1", "working", "⏳ review") in client.reports
 
 
 def test_run_rebootstraps_after_stream_close():
@@ -2222,11 +2231,9 @@ def test_run_rebootstraps_after_stream_close():
         streams.append(s)
         return s
 
-    d = make_daemon(client, [StaticProbe(None)], stream_factory=factory)
-
-    class Stop(Exception):
-        pass
-
+    d = make_daemon(client, [StaticProbe(None)], stream_factory=factory,
+                    reprobe_interval_s=0.001, resync_interval_s=0.001,
+                    progress_interval_s=0.001)
     ticks = {"n": 0}
 
     def clock():
@@ -2234,13 +2241,16 @@ def test_run_rebootstraps_after_stream_close():
         if ticks["n"] == 20 and streams:
             streams[0].feed({"event": "noop", "data": {}})  # wake, then EOF
             streams[0]._w.close()
-        if ticks["n"] > 80:
+        if ticks["n"] > 400:
             raise Stop()
-        return float(ticks["n"])
+        return float(ticks["n"]) * 0.001
 
     d._clock = clock
     try:
-        d.run(sleep=lambda s: None)
+        # backoff sleep only runs if bootstrap fails (it should not here);
+        # the loop is ended by clock() raising Stop, which the handler
+        # forwards into sleep -> Stop propagates
+        d.run(sleep=_stop_sleep)
     except Stop:
         pass
     assert len(streams) >= 2                  # reconnected with a new stream
