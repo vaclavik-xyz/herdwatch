@@ -815,3 +815,223 @@ def test_shutdown_releases_holds_and_clears_metadata():
     assert client.releases == ["w1:p1"]
     assert client.metadata[-1] == ("w2:p1", None, True, None)
     assert d.managed == {}
+
+
+def _status_event(pane="w1:p1", status="idle", custom=None, agent="claude"):
+    return {
+        "event": "pane.agent_status_changed",
+        "data": {
+            "pane_id": pane,
+            "workspace_id": "w1",
+            "agent_status": status,
+            "agent": agent,
+            "custom_status": custom,
+        },
+    }
+
+
+class FakeStream:
+    """Minimal stand-in for herdr_socket.EventStream bookkeeping (Task 8
+    replaces it with a socketpair-backed version; the interface is a
+    superset of this one)."""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_idle_edge_event_probes_immediately():
+    client = FakeClient([_agent(status="working")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=15)
+    seed(d, client)
+    d._last_probe["w1:p1"] = 0.0  # stale throttle from an old probe
+    client.agents["w1:p1"]["agent_status"] = "idle"
+    d.dispatch_event(_status_event(status="idle"))
+    assert client.reports == [("w1:p1", "working", "⏳ review")]
+
+
+def test_done_edge_event_labels_immediately():
+    client = FakeClient([_agent(status="working")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=15)
+    seed(d, client)
+    d._last_probe["w1:p1"] = 0.0
+    client.agents["w1:p1"]["agent_status"] = "done"
+    d.dispatch_event(_status_event(status="done"))
+    assert client.metadata == [("w1:p1", "⏳ review", False, 30000)]
+
+
+def test_self_echo_event_is_ignored():
+    client = FakeClient([_agent(status="idle")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=0)
+    seed(d, client)
+    d._reprobe_sweep()  # hold asserted
+    assert len(client.reports) == 1
+    d.dispatch_event(_status_event(status="working", custom="⏳ review"))
+    assert len(client.reports) == 1  # echo: no re-probe, no re-assert
+    assert d._registry["w1:p1"]["agent_status"] == "working"
+
+
+def test_progress_stop_event_hands_over_to_hold():
+    client = FakeClient([_claude_agent()])
+    probe = StaticProbe(None)
+    d = make_daemon(
+        client,
+        [probe],
+        reprobe_interval_s=15,
+        progress=lambda sid: "2/5 X",
+    )
+    seed(d, client)
+    d._progress_sweep()  # progress label on
+    assert d.managed["w1:p1"].kind == "progress"
+    probe.result = Pending("CI: ci", 20, "ci")
+    client.agents["w1:p1"]["agent_status"] = "idle"
+    d.dispatch_event(_status_event(status="idle"))
+    assert client.metadata[-1] == ("w1:p1", None, True, None)
+    assert client.reports[-1] == ("w1:p1", "working", "⏳ CI: ci")
+    assert d.managed["w1:p1"].kind == "hold"
+
+
+def test_blocked_event_clears_progress_without_hold():
+    client = FakeClient([_claude_agent()])
+    probe = StaticProbe(Pending("CI: ci", 20, "ci"))
+    d = make_daemon(
+        client,
+        [probe],
+        reprobe_interval_s=0,
+        progress=lambda sid: "2/5 X",
+    )
+    seed(d, client)
+    d._progress_sweep()
+    client.agents["w1:p1"]["agent_status"] = "blocked"
+    d.dispatch_event(_status_event(status="blocked"))
+    assert client.metadata[-1] == ("w1:p1", None, True, None)
+    assert client.reports == []  # no hold over a blocked pane
+    assert "w1:p1" not in d.managed
+
+
+def test_unknown_pane_event_schedules_resync():
+    client = FakeClient([])
+    d = make_daemon(client)
+    d.dispatch_event(_status_event(pane="w9:p9"))
+    assert d._resync_due is True
+
+
+def test_lifecycle_event_schedules_resync():
+    d = make_daemon(FakeClient([]))
+    d.dispatch_event(
+        {
+            "event": "pane_created",
+            "data": {"type": "pane_created", "pane": {"pane_id": "w1:p1"}},
+        }
+    )
+    assert d._resync_due is True
+
+
+def test_pane_moved_remaps_bookkeeping():
+    client = FakeClient([_agent(status="idle")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=0)
+    seed(d, client)
+    d._reprobe_sweep()
+    moved = _agent(pane="w2:p9", status="idle", term="term-w1:p1")
+    client.set_agents([moved])
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "previous_workspace_id": "w1",
+                "previous_tab_id": "w1:t1",
+                "pane": dict(moved),
+            },
+        }
+    )
+    assert "w1:p1" not in d.managed
+    assert d.managed["w2:p9"].kind == "hold"
+    assert d.managed["w2:p9"].terminal_id == "term-w1:p1"
+    assert "w2:p9" in d._registry and "w1:p1" not in d._registry
+    assert d._resync_due is True
+
+
+def test_pane_moved_tears_down_stream_for_resubscribe():
+    # the old per-pane subscription is bound to the dead pane id; only a
+    # new stream (re-bootstrap) restores event coverage for the moved pane
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(client)
+    seed(d, client)
+    stream = FakeStream()
+    d._stream = stream
+    moved = _agent(pane="w2:p9", status="idle", term="term-w1:p1")
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "previous_workspace_id": "w1",
+                "previous_tab_id": "w1:t1",
+                "pane": dict(moved),
+            },
+        }
+    )
+    assert stream.closed and d._stream is None
+
+
+def test_pane_moved_to_denied_pane_releases():
+    client = FakeClient([_agent(status="idle")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=0, deny=["w2:p9"])
+    seed(d, client)
+    d._reprobe_sweep()
+    moved = _agent(pane="w2:p9", status="idle", term="term-w1:p1")
+    client.set_agents([moved])
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "previous_workspace_id": "w1",
+                "previous_tab_id": "w1:t1",
+                "pane": dict(moved),
+            },
+        }
+    )
+    assert client.releases == ["w2:p9"]  # released under the NEW id
+    assert "w2:p9" not in d.managed
+
+
+def test_pane_moved_remaps_legacy_entry():
+    client = FakeClient([], release_ok=False)
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
+    moved = _agent(pane="w2:p9", status="working", term="term-w1:p1")
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "previous_workspace_id": "w1",
+                "previous_tab_id": "w1:t1",
+                "pane": dict(moved),
+            },
+        }
+    )
+    assert "w2:p9" in d._legacy_release and "w1:p1" not in d._legacy_release

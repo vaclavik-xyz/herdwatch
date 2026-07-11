@@ -24,6 +24,31 @@ from .progress import progress_label
 from .state import StateStore
 
 SOURCE = "herdwatch"
+GLOBAL_SUBSCRIPTIONS = [
+    {"type": "pane.created"},
+    {"type": "pane.closed"},
+    {"type": "pane.exited"},
+    {"type": "pane.agent_detected"},
+    {"type": "pane.moved"},
+    {"type": "workspace.closed"},
+    {"type": "tab.closed"},
+]
+# herdr emits dotted kinds on subscription events and snake_case kinds on
+# generic lifecycle events; accept both spellings for each
+LIFECYCLE_RESYNC_KINDS = {
+    "pane.created",
+    "pane_created",
+    "pane.closed",
+    "pane_closed",
+    "pane.exited",
+    "pane_exited",
+    "pane.agent_detected",
+    "pane_agent_detected",
+    "workspace.closed",
+    "workspace_closed",
+    "tab.closed",
+    "tab_closed",
+}
 MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
 TTL_MIN_MS = 1000
 TTL_MAX_MS = 86_400_000
@@ -163,6 +188,102 @@ class Daemon:
                 self._adopted.add(pane_id)
             elif not row.get("meta"):
                 self._legacy_release[pane_id] = mp
+
+    # ---------- event dispatch ----------
+
+    def dispatch_event(self, msg: dict) -> None:
+        kind = msg.get("event") or ""
+        data = msg.get("data") or {}
+        if kind in ("pane.agent_status_changed", "pane_agent_status_changed"):
+            self._on_status_event(data)
+        elif kind in ("pane.moved", "pane_moved"):
+            self._on_pane_moved(data)
+        elif kind in LIFECYCLE_RESYNC_KINDS:
+            self._resync_due = True
+
+    def _on_status_event(self, data: dict) -> None:
+        pane_id = data.get("pane_id")
+        if not pane_id or not self._eligible(pane_id):
+            return
+        rec = self._registry.get(pane_id)
+        if rec is None:
+            self._resync_due = True  # unknown pane: topology drifted
+            return
+        status = data.get("agent_status") or "unknown"
+        prev = rec.get("agent_status")
+        rec["agent_status"] = status
+        if data.get("agent"):
+            rec["agent"] = data["agent"]
+        mp = self.managed.get(pane_id)
+        if mp is not None:
+            expected = "done" if mp.kind == "done" else "working"
+            if (
+                status == expected
+                and (data.get("custom_status") or "") == mp.custom_status
+            ):
+                return  # ack of our own report/metadata write
+        if mp is not None and mp.kind == "progress" and status != "working":
+            # agent stopped (or blocked): drop the label now, and hold in the
+            # same dispatch when the pane is idle with pending work
+            if not self._clear_metadata(pane_id, "agent stopped"):
+                return
+            self._last_probe.pop(pane_id, None)
+        if status in ("idle", "done"):
+            if prev != status:
+                self._last_probe.pop(pane_id, None)  # fresh edge: probe now
+            self._probe_pane(pane_id)
+            self._publish()
+            return
+        # working/blocked/unknown edge: forget the timer so the next
+        # idle/done edge probes immediately (old tick semantics)
+        self._last_probe.pop(pane_id, None)
+
+    def _on_pane_moved(self, data: dict) -> None:
+        pane = data.get("pane") or {}
+        old, new = data.get("previous_pane_id"), pane.get("pane_id")
+        if not old or not new:
+            self._resync_due = True
+            return
+        self._remap(old, new, pane)
+        # The per-pane agent_status_changed subscription is bound to the OLD
+        # public pane id and goes silent after a move (herdr matches events
+        # by pane_id). A later resync cannot notice -- the registry is
+        # already remapped -- so tear the stream down here; the run loop
+        # re-bootstraps and resubscribes with the new pane set.
+        if self._stream is not None:
+            self._stream.close()
+            self._stream = None
+        self._resync_due = True
+
+    def _remap(self, old: str, new: str, rec: dict | None) -> None:
+        """Follow herdr's pane-id change: the assertion lives on inside herdr,
+        so bookkeeping must follow it -- releasing the old id would just
+        `not_found` while a permanent `working ⏳` survived under the new one."""
+        if rec:
+            self._registry[new] = rec
+            self._remember_record(rec)
+        self._registry.pop(old, None)
+        for mapping in (
+            self._last_probe,
+            self._session_cache,
+            self._meta_asserted_at,
+        ):
+            if old in mapping:
+                mapping[new] = mapping.pop(old)
+        if old in self.managed:
+            self.managed[new] = self.managed.pop(old)
+        if old in self._adopted:
+            self._adopted.discard(old)
+            self._adopted.add(new)
+        if old in self._legacy_release:
+            self._legacy_release[new] = self._legacy_release.pop(old)
+        mp = self.managed.get(new)
+        if mp is not None and not self._eligible(new):
+            if mp.kind == "hold":
+                self._release_hold(new, "moved to ineligible pane")
+            else:
+                self._clear_metadata(new, "moved to ineligible pane")
+        self._publish()
 
     # ---------- assert / release primitives ----------
 
