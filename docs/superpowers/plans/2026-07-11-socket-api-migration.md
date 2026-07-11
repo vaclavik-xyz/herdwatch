@@ -684,13 +684,15 @@ Replace `src/herdwatch/herdr.py` entirely:
 # src/herdwatch/herdr.py
 """HerdrClient: herdwatch's facade over the raw herdr socket API.
 
-Write methods keep boolean semantics (False = failed, retry later) so the
-daemon's retry logic stays transport-agnostic. `release`/`clear` calls
-treat a structured `not_found` as success: the pane is gone, so there is
-nothing left to release. `session_snapshot` raises instead — the daemon
-needs to tell "herdr is down" (HerdrUnavailable, retry with backoff) from
-"server too old for session.snapshot" (HerdrApiError, log the >= 0.7.2
-requirement).
+Most write methods keep boolean semantics (False = failed, retry later) so
+the daemon's retry logic stays transport-agnostic; metadata `clear` treats
+a structured `not_found` as success (the pane is gone and its metadata
+with it). `release_agent` is the exception — it returns "ok" / "gone" /
+"failed", because `not_found` may mean the pane was *moved* (assertion
+alive under a new pane id): the caller must reconcile before dropping
+bookkeeping. `session_snapshot` raises instead — the daemon needs to tell
+"herdr is down" (HerdrUnavailable, retry with backoff) from "server too
+old for session.snapshot" (HerdrApiError, log the >= 0.7.2 requirement).
 """
 from __future__ import annotations
 
@@ -1958,7 +1960,7 @@ def test_resync_releases_vanished_pane_and_drops_bookkeeping():
     seed(d, client)
     d._reprobe_sweep()
     client.set_agents([])
-    client._release_ok = False          # herdr can't release a gone pane
+    client._release_result = "gone"     # herdr can't release a gone pane
     d._resync()
     assert client.releases == ["w1:p1"]  # best-effort attempted
     assert d.managed == {}               # dropped regardless of outcome
