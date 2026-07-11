@@ -2222,6 +2222,62 @@ def test_run_rechecks_managed_hold_when_probe_sweep_outlives_interval():
     assert released_at["value"] - expires_at["value"] <= 15.0
 
 
+def test_run_discovers_new_marker_before_slow_sweep_reaches_pane():
+    now = {"value": 0.0}
+    reported_at = {"value": None}
+    pending = Pending("marker", 40, "marker")
+
+    class StopAfterReport(FakeClient):
+        def report_agent(
+            self, pane_id, source, agent, state, custom_status=None
+        ):
+            reported_at["value"] = now["value"]
+            super().report_agent(
+                pane_id, source, agent, state, custom_status
+            )
+            raise Stop()
+
+    class MarkerWithSlowMisses:
+        name = "marker"
+
+        def candidate_panes(self):
+            return {"w1:p3"}
+
+        def check_pane(self, pane_id):
+            return pending if pane_id == "w1:p3" else None
+
+        def check(self, ctx):
+            if ctx.pane_id == "w1:p3":
+                return pending
+            now["value"] += 8.0
+            return None
+
+    client = StopAfterReport(
+        [
+            _agent(pane="w1:p1", status="idle"),
+            _agent(pane="w1:p2", status="idle"),
+            _agent(pane="w1:p3", status="idle"),
+        ]
+    )
+    d = make_daemon(
+        client,
+        [MarkerWithSlowMisses()],
+        stream_factory=lambda subs: FakeStream(subs),
+        clock=lambda: now["value"],
+        reprobe_interval_s=15.0,
+        resync_interval_s=999.0,
+        progress_interval_s=999.0,
+    )
+
+    try:
+        d.run(sleep=lambda delay: None)
+    except Stop:
+        pass
+
+    assert client.reports == [("w1:p3", "working", "⏳ marker")]
+    assert reported_at["value"] <= 15.0
+
+
 def test_run_drains_stream_between_due_managed_reprobes():
     checks_since_read = {"value": 0, "max": 0}
     now = {"value": 0.0}

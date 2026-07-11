@@ -19,3 +19,4 @@ def test_marker_pending(tmp_path):
 
     direct = MarkerProbe(store).check_pane("w1:p1")
     assert direct == p
+    assert MarkerProbe(store).candidate_panes() == {"w1:p1"}

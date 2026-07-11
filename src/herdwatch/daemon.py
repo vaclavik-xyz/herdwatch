@@ -881,7 +881,30 @@ class Daemon:
                 return result
         return None
 
-    def _probe_pane(self, pane_id: str, *, fast: bool = False) -> None:
+    def _fast_pending_candidates(self) -> set[str]:
+        """Return panes advertised by cheap pane-only probes."""
+        candidates = set()
+        for probe in self._probes:
+            candidate_panes = getattr(probe, "candidate_panes", None)
+            if not callable(candidate_panes):
+                continue
+            try:
+                candidates.update(candidate_panes())
+            except Exception:
+                log.warning(
+                    "fast candidate probe %r raised; ignoring candidates",
+                    getattr(probe, "name", probe),
+                    exc_info=True,
+                )
+        return candidates
+
+    def _probe_pane(
+        self,
+        pane_id: str,
+        *,
+        fast: bool = False,
+        fast_only: bool = False,
+    ) -> None:
         """Make the per-pane decision from the current registry record."""
         if not self._eligible(pane_id):
             return
@@ -925,6 +948,8 @@ class Daemon:
                 return
 
         pending = self._fast_pending(pane_id) if fast else None
+        if fast_only and pending is None:
+            return
         if pending is not None:
             label = aggregate([pending])
             agent_name = rec.get("agent") or "agent"
@@ -1153,13 +1178,16 @@ class Daemon:
         backoff = self._backoff_base
         registered = None
         connected_at = None
+        fast_candidate_cursor = 0
+        next_fast_candidate_scan = 0.0
         managed_reprobe_cursor = 0
         next_reprobe = next_progress = self._clock()
         next_resync = self._clock() + self._resync_interval
 
         def _drain_probe_events() -> bool:
             """Keep the non-blocking status stream moving between probes."""
-            nonlocal backoff, managed_reprobe_cursor
+            nonlocal backoff, fast_candidate_cursor
+            nonlocal managed_reprobe_cursor, next_fast_candidate_scan
             stream = self._stream
             if stream is None or stream.closed:
                 return False
@@ -1169,6 +1197,7 @@ class Daemon:
                 backoff = self._backoff_base
             for message in messages:
                 self.dispatch_event(message)
+            fast_candidate_checked = False
             if (
                 self._stream is stream
                 and not stream.closed
@@ -1182,10 +1211,33 @@ class Daemon:
                         rec = self._registry.get(pane_id) or {}
                         if rec.get("agent_status") in ("idle", "done"):
                             self._probe_pane(pane_id, fast=True)
+            candidate_now = self._clock()
+            if (
+                self._stream is stream
+                and not stream.closed
+                and candidate_now >= next_fast_candidate_scan
+            ):
+                next_fast_candidate_scan = candidate_now + 1.0
+                candidates = sorted(self._fast_pending_candidates())
+                for offset in range(len(candidates)):
+                    index = (
+                        fast_candidate_cursor + offset
+                    ) % len(candidates)
+                    pane_id = candidates[index]
+                    rec = self._registry.get(pane_id) or {}
+                    if rec.get("agent_status") not in ("idle", "done"):
+                        continue
+                    fast_candidate_cursor = (index + 1) % len(candidates)
+                    self._probe_pane(
+                        pane_id, fast=True, fast_only=True
+                    )
+                    fast_candidate_checked = True
+                    break
             if (
                 self._stream is stream
                 and not stream.closed
                 and self._reprobe > 0
+                and not fast_candidate_checked
             ):
                 # A full sweep can outlive the reprobe interval when external
                 # probes are slow. Recheck at most one due managed pane per

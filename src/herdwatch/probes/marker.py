@@ -19,5 +19,9 @@ class MarkerProbe:
             return None
         return Pending(label=active[0].label, priority=PRIORITY, source=self.name)
 
+    def candidate_panes(self) -> set[str]:
+        """Return panes with marker files without evaluating their commands."""
+        return {marker.pane_id for marker in self._store.all()}
+
     def check(self, ctx: PaneContext) -> Pending | None:
         return self.check_pane(ctx.pane_id)
