@@ -559,7 +559,11 @@ class Daemon:
             if not mp.terminal_id and pane_id in records:
                 mp.terminal_id = records[pane_id].get("terminal_id") or ""
 
-    def _apply_terminal_moves(self, by_terminal: dict[str, str]) -> None:
+    def _apply_terminal_moves(
+        self,
+        records: dict[str, dict],
+        by_terminal: dict[str, str],
+    ) -> None:
         """Apply direct terminal-id remaps atomically, including swaps."""
         books = (self.managed, self._legacy_release)
         candidates: dict[tuple[int, str], str] = {}
@@ -639,6 +643,10 @@ class Daemon:
                 self._adopted.add(target)
             log.info("remapped %s -> %s by terminal id", source[1], target)
         for pane_id in moved_managed_targets:
+            current = records.get(pane_id)
+            if current is not None:
+                self._registry[pane_id] = current
+                self._remember_record(current)
             mp = self.managed.get(pane_id)
             if mp is None or self._eligible(pane_id):
                 continue
@@ -653,7 +661,7 @@ class Daemon:
         """Move reconciliation + vanish handling for managed and legacy rows
         against snapshot truth. Shared by _resync and bootstrap (so adopted
         rows are reconciled BEFORE the first sweep can release stale ids)."""
-        self._apply_terminal_moves(by_terminal)
+        self._apply_terminal_moves(records, by_terminal)
         for book in (self.managed, self._legacy_release):
             for pane_id in list(book):
                 mp = book[pane_id]

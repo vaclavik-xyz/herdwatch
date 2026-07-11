@@ -1827,6 +1827,9 @@ def test_resync_releases_hold_remapped_to_denied_pane():
         [_agent(pane="w2:p1", status="idle", term="term-old")]
     )
     d = make_daemon(client, deny=["w2:p1"])
+    stale_target = _owned_agent(pane="w2:p1", status="idle")
+    stale_target["terminal_id"] = "term-previous"
+    d._registry["w2:p1"] = stale_target
     d.adopt(
         [
             {
