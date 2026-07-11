@@ -1149,17 +1149,25 @@ class Daemon:
 
         if mp is not None and mp.kind == "idle-meta":
             if status == "idle":
-                if label:
-                    self._assert_metadata(
-                        pane_id, agent_name, label, "idle-meta"
-                    )
-                elif not self._clear_metadata(pane_id, "work cleared"):
+                if self._foreign_session_owner(pane_id) is not None:
+                    if label:
+                        self._assert_metadata(
+                            pane_id, agent_name, label, "idle-meta"
+                        )
+                    elif not self._clear_metadata(pane_id, "work cleared"):
+                        self._last_probe.pop(pane_id, None)
+                    return True
+                if not self._clear_metadata(
+                    pane_id, "foreign session owner cleared"
+                ):
                     self._last_probe.pop(pane_id, None)
-                return True
-            if not self._clear_metadata(pane_id, f"left idle ({status})"):
+                    return True
+                mp = None
+            elif not self._clear_metadata(pane_id, f"left idle ({status})"):
                 self._last_probe.pop(pane_id, None)
                 return True
-            mp = None
+            else:
+                mp = None
 
         if mp is not None and mp.kind == "done":
             if status == "done":

@@ -186,6 +186,25 @@ def test_foreign_session_owner_gets_idle_metadata_without_lifecycle_claim():
     assert d._rows()[0]["meta"] is True
 
 
+def test_idle_metadata_upgrades_to_hold_when_foreign_owner_disappears():
+    client = FakeClient([_owned_agent()])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    assert d.managed["w1:p1"].kind == "idle-meta"
+
+    client.agents["w1:p1"].pop("agent_session")
+    d._reprobe_sweep()
+
+    assert client.metadata[-1] == ("w1:p1", None, True, None)
+    assert client.reports == [("w1:p1", "working", "⏳ review")]
+    assert d.managed["w1:p1"].kind == "hold"
+
+
 def test_foreign_session_idle_metadata_clears_without_lifecycle_release():
     client = FakeClient([_owned_agent()])
     probe = StaticProbe(Pending("review", 30, "roborev"))
