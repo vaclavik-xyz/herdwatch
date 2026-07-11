@@ -526,9 +526,20 @@ class Daemon:
         self._last_probe.pop(pane_id, None)
 
     def _on_pane_moved(self, data: dict) -> None:
-        pane = data.get("pane") or {}
-        old, new = data.get("previous_pane_id"), pane.get("pane_id")
-        if not old or not new:
+        pane = data.get("pane")
+        old = data.get("previous_pane_id")
+        try:
+            if not isinstance(old, str) or not old:
+                raise HerdrUnavailable(
+                    "pane.moved previous_pane_id must be a string"
+                )
+            validate_agent_record(pane, context="pane.moved pane")
+        except HerdrUnavailable as exc:
+            log.warning("invalid pane.moved event; resyncing: %s", exc)
+            self._schedule_resync(debounce=False)
+            return
+        new = pane["pane_id"]
+        if new == old:
             self._schedule_resync(debounce=False)
             return
         terminal_id = pane.get("terminal_id")

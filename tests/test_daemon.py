@@ -2059,6 +2059,38 @@ def test_terminal_less_hold_is_not_poisoned_by_stale_matching_move():
     assert d._resync_due is True
 
 
+def test_malformed_pane_move_does_not_partially_remap_state():
+    client = FakeClient([_agent(status="idle", term="term-original")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    d._last_probe["w1:p1"] = 12.0
+    malformed = _agent(
+        pane="w2:p9", status="working", term="term-original"
+    )
+    malformed["agent_session"] = ["bad"]
+
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "pane": malformed,
+            },
+        }
+    )
+
+    assert set(d._registry) == {"w1:p1"}
+    assert set(d.managed) == {"w1:p1"}
+    assert d._last_probe == {"w1:p1": 12.0}
+    assert d._resync_due is True
+
+
 def test_pane_moved_to_denied_pane_releases():
     client = FakeClient([_agent(status="idle")])
     probe = StaticProbe(Pending("review", 30, "roborev"))
