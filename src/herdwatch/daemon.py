@@ -312,14 +312,21 @@ class Daemon:
                 if (
                     new_id is None
                     and not mp.terminal_id
-                    and book is self._legacy_release
+                    and (
+                        book is self._legacy_release
+                        or (
+                            book is self.managed
+                            and pane_id in self._adopted
+                            and mp.kind == "hold"
+                        )
+                    )
                 ):
-                    # label-match salvage (legacy rows only): a move before
-                    # our first snapshot left no terminal_id; a unique
-                    # (agent, custom_status) match among untracked panes is
-                    # safe to adopt -- a mismatched target either has no
-                    # herdwatch assertion (release is a no-op) or carries a
-                    # herdwatch orphan (releasing it is also correct cleanup)
+                    # A pre-migration row can move before the first snapshot
+                    # and has no terminal_id. Salvage legacy cleanup rows and
+                    # adopted holds only; runtime-managed rows must never be
+                    # remapped by a label guess. A unique match among
+                    # untracked panes is safe: a mismatch either has no
+                    # herdwatch assertion or carries an orphan from our source.
                     matches = [
                         pid
                         for pid, a in records.items()

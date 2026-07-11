@@ -1213,6 +1213,29 @@ def test_resync_salvages_legacy_row_by_unique_label_match():
     assert "w2:p9" in d._legacy_release and "w1:p1" not in d._legacy_release
 
 
+def test_resync_salvages_adopted_hold_by_unique_label_match():
+    moved = _agent(pane="w2:p9", status="working")
+    moved["custom_status"] = "⏳ review"
+    client = FakeClient([moved])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+            }
+        ]
+    )
+
+    d._resync()
+
+    assert "w2:p9" in d.managed and "w1:p1" not in d.managed
+    assert "w2:p9" in d._adopted
+    assert client.releases == []
+
+
 def test_resync_drops_unmatchable_legacy_row():
     client = FakeClient([_agent(pane="w3:p1", status="idle")])
     d = make_daemon(client)
