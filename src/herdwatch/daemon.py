@@ -571,6 +571,16 @@ class Daemon:
             self._schedule_resync(debounce=False)
             return
         terminal_id = pane.get("terminal_id")
+        target_tracked = self.managed.get(new) or self._legacy_release.get(new)
+        if target_tracked is not None and (
+            not terminal_id
+            or not target_tracked.terminal_id
+            or target_tracked.terminal_id != terminal_id
+        ):
+            # A move into another tracked public id may be one leg of a swap.
+            # Snapshot reconciliation applies all terminal moves atomically.
+            self._schedule_resync(debounce=False)
+            return
         old_record = self._registry.get(old)
         new_record = self._registry.get(new)
         tracked = self.managed.get(old) or self._legacy_release.get(old)

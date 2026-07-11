@@ -2022,6 +2022,61 @@ def test_pane_moved_remaps_bookkeeping():
     assert d._resync_due is True
 
 
+def test_pane_moved_defers_managed_target_collision_to_atomic_resync():
+    client = FakeClient(
+        [
+            _agent(pane="w1:p1", status="idle", term="term-a"),
+            _agent(pane="w2:p1", status="idle", term="term-b"),
+        ]
+    )
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ A",
+                "kind": "hold",
+                "terminal_id": "term-a",
+            },
+            {
+                "pane_id": "w2:p1",
+                "agent": "claude",
+                "status": "⏳ B",
+                "kind": "hold",
+                "terminal_id": "term-b",
+            },
+        ]
+    )
+    seed(d, client)
+    moved_a = _agent(pane="w2:p1", status="idle", term="term-a")
+    moved_b = _agent(pane="w1:p1", status="idle", term="term-b")
+    client.set_agents([moved_a, moved_b])
+
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "pane": moved_a,
+            },
+        }
+    )
+
+    assert set(d.managed) == {"w1:p1", "w2:p1"}
+    assert d.managed["w1:p1"].terminal_id == "term-a"
+    assert d.managed["w2:p1"].terminal_id == "term-b"
+    assert d._resync_due is True
+
+    assert d._resync() is True
+    assert d.managed["w1:p1"].terminal_id == "term-b"
+    assert d.managed["w1:p1"].custom_status == "⏳ B"
+    assert d.managed["w2:p1"].terminal_id == "term-a"
+    assert d.managed["w2:p1"].custom_status == "⏳ A"
+    assert client.releases == []
+
+
 def test_pane_moved_tears_down_stream_for_resubscribe():
     # the old per-pane subscription is bound to the dead pane id; only a
     # new stream (re-bootstrap) restores event coverage for the moved pane
