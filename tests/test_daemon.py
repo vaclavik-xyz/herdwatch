@@ -872,9 +872,11 @@ def test_self_echo_event_is_ignored():
     seed(d, client)
     d._reprobe_sweep()  # hold asserted
     assert len(client.reports) == 1
+    last_probe = d._last_probe["w1:p1"]
     d.dispatch_event(_status_event(status="working", custom="⏳ review"))
     assert len(client.reports) == 1  # echo: no re-probe, no re-assert
     assert d._registry["w1:p1"]["agent_status"] == "working"
+    assert d._last_probe["w1:p1"] == last_probe
 
 
 def test_progress_stop_event_hands_over_to_hold():
