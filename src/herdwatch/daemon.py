@@ -25,6 +25,8 @@ from .state import StateStore
 
 SOURCE = "herdwatch"
 MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
+TTL_MIN_MS = 1000
+TTL_MAX_MS = 86_400_000
 log = logging.getLogger(__name__)
 
 
@@ -32,76 +34,64 @@ log = logging.getLogger(__name__)
 class ManagedPane:
     custom_status: str
     agent: str
-    kind: str = "hold"  # "hold" = ⏳ wait assertion, "progress" = task-list label
+    kind: str = "hold"  # "hold" | "progress" | "done"
+    terminal_id: str = ""
 
 
 class Daemon:
-    def __init__(self, client, probes, reprobe_interval_s: float = 15.0,
-                 clock: Callable[[], float] = time.time,
-                 enrich: Callable[[str], gitctx.GitInfo] = gitctx.enrich,
-                 allow: list[str] | None = None,
-                 deny: list[str] | None = None,
-                 on_snapshot: Callable[[list[dict]], None] = lambda rows: None,
-                 progress: Callable[[str], str | None] | None = None) -> None:
+    def __init__(
+        self,
+        client,
+        probes,
+        *,
+        reprobe_interval_s: float = 15.0,
+        resync_interval_s: float = 60.0,
+        progress_interval_s: float = 4.0,
+        clock: Callable[[], float] = time.time,
+        enrich: Callable[[str], gitctx.GitInfo] = gitctx.enrich,
+        allow: list[str] | None = None,
+        deny: list[str] | None = None,
+        on_snapshot: Callable[[list[dict]], None] = lambda rows: None,
+        progress: Callable[[str], str | None] | None = None,
+        stream_factory=None,
+        backoff_base_s: float = 0.5,
+        backoff_max_s: float = 30.0,
+    ) -> None:
         self._client = client
         self._probes = probes
         self._reprobe = reprobe_interval_s
+        self._resync_interval = resync_interval_s
+        self._progress_interval = progress_interval_s
         self._clock = clock
         self._enrich = enrich
         self._allow = set(allow or [])
         self._deny = set(deny or [])
         self._on_snapshot = on_snapshot
         self._progress = progress
+        self._stream_factory = stream_factory
+        self._backoff_base = backoff_base_s
+        self._backoff_max = backoff_max_s
         self.managed: dict[str, ManagedPane] = {}
+        # Pre-migration semantic assertions awaiting release (see adopt).
+        self._legacy_release: dict[str, ManagedPane] = {}
+        # Last known agent records, keyed by pane_id (snapshot is truth).
+        self._registry: dict[str, dict] = {}
         self._last_probe: dict[str, float] = {}
         # herdr reports agent_session only for idle/done panes, never while a
-        # pane is working -- exactly when the progress path needs it. Cache the
-        # session per pane from any tick that carries it and reuse it while the
-        # pane works. A pane already working at daemon start and never seen idle
-        # has no cached session, so it gets no progress label until it next idles.
+        # pane is working -- exactly when the progress path needs it. Cache it
+        # from any record that carries it.
         self._session_cache: dict[str, str] = {}
-        # panes recovered from a prior run: force one re-assert to herdr on the
-        # first probe, since herdr may have lost the old assertion while we were down
+        self._meta_asserted_at: dict[str, float] = {}
         self._adopted: set[str] = set()
+        self._stream = None
+        self._resync_due = False
+        self._last_boot_error: str | None = None
 
-    def _rows(self) -> list[dict]:
-        return [{"pane_id": pid, "agent": mp.agent, "status": mp.custom_status,
-                 "kind": mp.kind}
-                for pid, mp in sorted(self.managed.items())]
+    # ---------- small helpers ----------
 
-    def adopt(self, rows: list[dict]) -> None:
-        """Recover the managed set from a prior run's state snapshot so a restart
-        reconciles the panes we were holding: the next tick re-probes each and
-        either re-asserts or releases it, instead of leaving an orphaned
-        `working ⏳` assertion behind after an unclean shutdown."""
-        for row in rows:
-            pane_id = row.get("pane_id")
-            if pane_id:
-                self.managed[pane_id] = ManagedPane(row.get("status", ""),
-                                                    row.get("agent", "agent"),
-                                                    kind=row.get("kind", "hold"))
-                self._adopted.add(pane_id)
-
-    def _publish(self) -> None:
-        try:
-            self._on_snapshot(self._rows())
-        except Exception:
-            log.warning("snapshot publish failed; continuing", exc_info=True)
-
-    def _release(self, pane_id: str, reason: str) -> bool:
-        """Release our assertion and drop bookkeeping only if herdr confirmed it,
-        so a failed release (herdr down/restarting) is retried instead of
-        orphaning a `working ⏳` session. Returns whether the pane is now clear."""
-        mp = self.managed.get(pane_id)
-        if mp is None:
-            return True
-        if self._client.release_agent(pane_id, SOURCE, mp.agent):
-            del self.managed[pane_id]
-            self._adopted.discard(pane_id)
-            log.info("release %s (%s)", pane_id, reason)
-            return True
-        log.warning("release of %s failed (%s); keeping to retry", pane_id, reason)
-        return False
+    def _ttl_ms(self) -> int:
+        ttl = int(2 * self._reprobe * 1000)
+        return max(TTL_MIN_MS, min(TTL_MAX_MS, ttl))
 
     def _eligible(self, pane_id: str) -> bool:
         if self._deny and pane_id in self._deny:
@@ -110,14 +100,160 @@ class Daemon:
             return False
         return True
 
-    def _context(self, agent: dict) -> PaneContext:
-        cwd = agent.get("cwd") or agent.get("foreground_cwd") or ""
+    def _remember_record(self, rec: dict) -> None:
+        session = (rec.get("agent_session") or {}).get("value")
+        if session:
+            self._session_cache[rec["pane_id"]] = session
+
+    def _terminal_id(self, pane_id: str) -> str:
+        rec = self._registry.get(pane_id) or {}
+        return rec.get("terminal_id") or ""
+
+    def _rows(self) -> list[dict]:
+        rows = [
+            {
+                "pane_id": pane_id,
+                "agent": mp.agent,
+                "status": mp.custom_status,
+                "kind": mp.kind,
+                "terminal_id": mp.terminal_id,
+                "meta": mp.kind in ("progress", "done"),
+            }
+            for pane_id, mp in sorted(self.managed.items())
+        ]
+        rows += [
+            {
+                "pane_id": pane_id,
+                "agent": mp.agent,
+                "status": mp.custom_status,
+                "kind": mp.kind,
+                "terminal_id": mp.terminal_id,
+                "meta": False,
+            }
+            for pane_id, mp in sorted(self._legacy_release.items())
+        ]
+        return rows
+
+    def _publish(self) -> None:
+        try:
+            self._on_snapshot(self._rows())
+        except Exception:
+            log.warning("snapshot publish failed; continuing", exc_info=True)
+
+    def adopt(self, rows: list[dict]) -> None:
+        """Recover state from a prior run.
+
+        Hold rows are re-adopted and force one re-assert. Metadata rows from
+        this daemon generation are skipped because their TTL self-cleans.
+        Non-hold rows without the flag are pre-migration semantic assertions
+        and stay in a retry set until release_agent confirms cleanup.
+        """
+        for row in rows:
+            pane_id = row.get("pane_id")
+            if not pane_id:
+                continue
+            mp = ManagedPane(
+                row.get("status", ""),
+                row.get("agent", "agent"),
+                kind=row.get("kind", "hold"),
+                terminal_id=row.get("terminal_id", ""),
+            )
+            if mp.kind == "hold":
+                self.managed[pane_id] = mp
+                self._adopted.add(pane_id)
+            elif not row.get("meta"):
+                self._legacy_release[pane_id] = mp
+
+    # ---------- assert / release primitives ----------
+
+    def _assert_hold(self, pane_id: str, agent: str, label: str) -> None:
+        if self._client.report_agent(
+            pane_id, SOURCE, agent, "working", label
+        ):
+            self.managed[pane_id] = ManagedPane(
+                label,
+                agent,
+                kind="hold",
+                terminal_id=self._terminal_id(pane_id),
+            )
+            self._adopted.discard(pane_id)
+            log.info("hold %s -> %s (%s)", pane_id, label, agent)
+        else:
+            # Do not record a failed write, and let the next sweep retry now.
+            self._last_probe.pop(pane_id, None)
+
+    def _assert_metadata(
+        self, pane_id: str, agent: str, label: str, kind: str
+    ) -> None:
+        if self._client.report_metadata(
+            pane_id,
+            SOURCE,
+            agent=agent,
+            custom_status=label,
+            ttl_ms=self._ttl_ms(),
+        ):
+            self.managed[pane_id] = ManagedPane(
+                label,
+                agent,
+                kind=kind,
+                terminal_id=self._terminal_id(pane_id),
+            )
+            self._meta_asserted_at[pane_id] = self._clock()
+            log.info("%s %s -> %s (%s)", kind, pane_id, label, agent)
+        else:
+            self._last_probe.pop(pane_id, None)
+
+    def _release_hold(self, pane_id: str, reason: str) -> bool:
+        mp = self.managed.get(pane_id)
+        if mp is None:
+            return True
+        outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
+        if outcome == "ok":
+            del self.managed[pane_id]
+            self._adopted.discard(pane_id)
+            log.info("release %s (%s)", pane_id, reason)
+            return True
+        if outcome == "gone":
+            # not_found can mean moved: keep bookkeeping until resync can
+            # remap it by terminal_id or confirm that the pane is truly gone.
+            self._resync_due = True
+            log.info(
+                "release of %s answered not_found (%s); reconciling",
+                pane_id,
+                reason,
+            )
+            return False
+        log.warning(
+            "release of %s failed (%s); keeping to retry", pane_id, reason
+        )
+        return False
+
+    def _clear_metadata(self, pane_id: str, reason: str) -> bool:
+        mp = self.managed.get(pane_id)
+        if mp is None:
+            return True
+        if self._client.report_metadata(
+            pane_id, SOURCE, agent=mp.agent, clear_custom_status=True
+        ):
+            del self.managed[pane_id]
+            self._meta_asserted_at.pop(pane_id, None)
+            log.info("clear %s (%s)", pane_id, reason)
+            return True
+        log.warning(
+            "metadata clear of %s failed (%s); keeping to retry", pane_id, reason
+        )
+        return False
+
+    # ---------- per-pane decision ----------
+
+    def _context(self, rec: dict) -> PaneContext:
+        cwd = rec.get("cwd") or rec.get("foreground_cwd") or ""
         gi = self._enrich(cwd)
         return PaneContext(
-            pane_id=agent["pane_id"],
-            agent=agent.get("agent") or "agent",
+            pane_id=rec["pane_id"],
+            agent=rec.get("agent") or "agent",
             cwd=cwd,
-            status=agent.get("agent_status") or "unknown",
+            status=rec.get("agent_status") or "unknown",
             head_sha=gi.head_sha,
             branch=gi.branch,
             is_git_repo=gi.is_git_repo,
@@ -125,151 +261,206 @@ class Daemon:
             worktree_heads=gi.worktree_heads,
         )
 
-    def _progress_tick(self, pane_id: str, agent: dict,
-                       mp: ManagedPane | None, status: str) -> str | None:
-        """Working-pane progress path. Returns the pane's true status when the
-        idle/hold flow should continue with it, or None when the pane was
-        handled here (it is genuinely working)."""
-        if mp is not None:
-            # our own assertion masks agent_status; screen detection does not
-            status = self._client.agent_explain(pane_id) or "idle"
-        if status != "working":
-            if mp is not None:
-                self._release(pane_id, "agent stopped")
-                # a stale timer from an idle probe that predates the progress
-                # assertion must not throttle the same-tick hold takeover below
-                self._last_probe.pop(pane_id, None)
-            return status
-        label = None
-        if self._progress is not None and (agent.get("agent") or "") == "claude":
-            session = ((agent.get("agent_session") or {}).get("value")
-                       or self._session_cache.get(pane_id))
-            if session:
-                try:
-                    label = self._progress(session)
-                except Exception:
-                    log.warning("progress read failed; skipping", exc_info=True)
-        if label:
-            agent_name = agent.get("agent") or "agent"
-            if (mp is not None and mp.custom_status == label
-                    and pane_id not in self._adopted):
-                pass  # already asserting this exact label
-            elif self._client.report_agent(pane_id, SOURCE, agent_name, "working", label):
-                self.managed[pane_id] = ManagedPane(label, agent_name, kind="progress")
-                self._adopted.discard(pane_id)
-                log.info("progress %s -> %s (%s)", pane_id, label, agent_name)
-        elif mp is not None:
-            self._release(pane_id, "no active task")
-        if pane_id not in self.managed:
-            # busy and unheld: forget the timer so a fresh idle edge probes
-            # immediately (preserves the pre-progress behaviour)
-            self._last_probe.pop(pane_id, None)
-        return None
+    def _run_probes(self, ctx: PaneContext) -> str | None:
+        pendings = []
+        for probe in self._probes:
+            try:
+                result = probe.check(ctx)
+            except Exception:
+                log.warning(
+                    "probe %r raised; treating as not pending",
+                    getattr(probe, "name", probe),
+                    exc_info=True,
+                )
+                result = None
+            if result:
+                pendings.append(result)
+        return aggregate(pendings)
 
-    def tick(self) -> None:
-        seen = set()
-        for agent in self._client.agent_list():
-            pane_id = agent.get("pane_id")
-            if not pane_id or not self._eligible(pane_id):
-                continue
-            seen.add(pane_id)
-            sess = (agent.get("agent_session") or {}).get("value")
-            if sess:
-                self._session_cache[pane_id] = sess
-            status = agent.get("agent_status") or "unknown"
-            mp = self.managed.get(pane_id)
-            if mp is None or mp.kind == "progress":
-                fallthrough = self._progress_tick(pane_id, agent, mp, status)
-                if fallthrough is None:
-                    continue
-                status = fallthrough
-            managed = pane_id in self.managed
-            if not managed and status != "idle":
-                # Only start a hold on an already-seen `idle` pane. A `done`
-                # pane is herdr's "finished but unseen" signal; herdwatch cannot
-                # re-assert `done` (report-agent rejects it), so holding it as
-                # `working` and later releasing would degrade it to `idle` and
-                # make unseen work look already-seen. Leave `done` (and busy)
-                # panes alone; forget the timer so the next idle edge -- e.g.
-                # done->idle once the user views it -- probes immediately.
+    def _probe_pane(self, pane_id: str) -> None:
+        """Make the per-pane decision from the current registry record."""
+        if not self._eligible(pane_id):
+            return
+        now = self._clock()
+        last = self._last_probe.get(pane_id)
+        if last is not None and (now - last) < self._reprobe:
+            return
+
+        rec = self._client.agent_get(pane_id)
+        if rec is not None:
+            self._registry[pane_id] = rec
+            self._remember_record(rec)
+        else:
+            rec = self._registry.get(pane_id)
+            if rec is None:
+                return
+
+        status = rec.get("agent_status") or "unknown"
+        mp = self.managed.get(pane_id)
+        if mp is not None and mp.kind == "progress":
+            # Recover from a missed working-to-idle/done event.
+            if status != "working":
+                if not self._clear_metadata(pane_id, "agent stopped"):
+                    return
                 self._last_probe.pop(pane_id, None)
-                continue
-            now = self._clock()
-            last = self._last_probe.get(pane_id)
-            if last is not None and (now - last) < self._reprobe:
-                continue
-            ctx = self._context(agent)
-            pendings = []
-            for p in self._probes:
-                try:
-                    r = p.check(ctx)
-                except Exception:
-                    log.warning("probe %r raised; treating as not pending",
-                                getattr(p, "name", p), exc_info=True)
-                    r = None
-                if r:
-                    pendings.append(r)
-            self._last_probe[pane_id] = now
-            label = aggregate(pendings)
+                mp = None
+            else:
+                return
+
+        ctx = self._context(rec)
+        label = self._run_probes(ctx)
+        self._last_probe[pane_id] = now
+        agent_name = ctx.agent
+
+        if mp is not None and mp.kind == "hold":
             if label:
-                agent_name = ctx.agent
-                if (managed and self.managed[pane_id].custom_status == label
-                        and pane_id not in self._adopted):
-                    pass  # already asserting this exact label; nothing to do
-                elif self._client.report_agent(pane_id, SOURCE, agent_name, "working", label):
-                    self.managed[pane_id] = ManagedPane(label, agent_name)
-                    self._adopted.discard(pane_id)
-                    log.info("hold %s -> %s (%s)", pane_id, label, agent_name)
-                else:
-                    # report failed (herdr down): don't record, and don't let the
-                    # throttle defer the retry to the next reprobe interval
-                    self._last_probe.pop(pane_id, None)
-            elif managed:
-                if not self._release(pane_id, "work cleared"):
-                    self._last_probe.pop(pane_id, None)  # failed release -> retry promptly
-        # a managed pane that vanished from agent_list: release our assertion so
-        # we never orphan a `working ⏳` session in herdr (agent exited, pane
-        # closed, or herdr restarted/blipped). Keep bookkeeping on failure so the
-        # release is retried next tick instead of leaking the assertion.
-        for pane_id in list(self.managed):
-            if pane_id not in seen:
-                self._release(pane_id, "vanished from agent list")
-        for pane_id in list(self._last_probe):
-            if pane_id not in seen:
+                if mp.custom_status != label or pane_id in self._adopted:
+                    self._assert_hold(pane_id, agent_name, label)
+                return
+            if not self._release_hold(pane_id, "work cleared"):
                 self._last_probe.pop(pane_id, None)
-        for pane_id in list(self._session_cache):
-            if pane_id not in seen:
-                self._session_cache.pop(pane_id, None)
+            return
+
+        if mp is not None and mp.kind == "done":
+            if status == "done":
+                if label:
+                    self._assert_metadata(pane_id, agent_name, label, "done")
+                elif not self._clear_metadata(pane_id, "work cleared"):
+                    self._last_probe.pop(pane_id, None)
+                return
+            # Clear the done label, then let an idle pane become a hold now.
+            if not self._clear_metadata(pane_id, f"left done ({status})"):
+                self._last_probe.pop(pane_id, None)
+                return
+            mp = None
+
+        if status == "idle":
+            if label:
+                self._assert_hold(pane_id, agent_name, label)
+            return
+        if status == "done":
+            if label:
+                self._assert_metadata(pane_id, agent_name, label, "done")
+            return
+
+        # Leave unmanaged working/blocked/unknown panes alone. Forget the
+        # timer so the next idle/done edge probes immediately.
+        self._last_probe.pop(pane_id, None)
+
+    # ---------- sweeps ----------
+
+    def _reprobe_sweep(self) -> None:
+        for pane_id, mp in list(self._legacy_release.items()):
+            outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
+            if outcome == "ok":
+                del self._legacy_release[pane_id]
+                log.info("released legacy assertion on %s", pane_id)
+            elif outcome == "gone":
+                self._resync_due = True
+
+        for pane_id in list(self.managed):
+            mp = self.managed.get(pane_id)
+            if mp is None:
+                continue
+            if not self._eligible(pane_id):
+                if mp.kind == "hold":
+                    self._release_hold(pane_id, "pane no longer eligible")
+                else:
+                    self._clear_metadata(pane_id, "pane no longer eligible")
+                continue
+            self._probe_pane(pane_id)
+
+        for pane_id, rec in list(self._registry.items()):
+            if pane_id in self.managed or not self._eligible(pane_id):
+                continue
+            if rec.get("agent_status") in ("idle", "done"):
+                self._probe_pane(pane_id)
         self._publish()
 
-    def release_all(self) -> None:
-        """Release every pane herdwatch currently asserts (clean shutdown)."""
+    def _progress_sweep(self) -> None:
+        if self._progress is None:
+            return
+        now = self._clock()
+        for pane_id, rec in list(self._registry.items()):
+            if not self._eligible(pane_id):
+                continue
+            mp = self.managed.get(pane_id)
+            if mp is not None and mp.kind != "progress":
+                continue
+            if (
+                rec.get("agent_status") != "working"
+                or (rec.get("agent") or "") != "claude"
+            ):
+                continue
+            session = (
+                (rec.get("agent_session") or {}).get("value")
+                or self._session_cache.get(pane_id)
+            )
+            if not session:
+                continue
+            try:
+                label = self._progress(session)
+            except Exception:
+                log.warning("progress read failed; skipping", exc_info=True)
+                continue
+            if label:
+                stale = (
+                    now - self._meta_asserted_at.get(pane_id, 0.0)
+                ) >= self._ttl_ms() / 2000.0
+                if mp is None or mp.custom_status != label or stale:
+                    self._assert_metadata(
+                        pane_id,
+                        rec.get("agent") or "agent",
+                        label,
+                        "progress",
+                    )
+            elif mp is not None:
+                self._clear_metadata(pane_id, "no active task")
+        self._publish()
+
+    # ---------- shutdown ----------
+
+    def shutdown(self) -> None:
+        """Clean up owned assertions, retaining rows for failed hold cleanup."""
         for pane_id, mp in list(self.managed.items()):
             try:
-                self._client.release_agent(pane_id, SOURCE, mp.agent)
+                if mp.kind == "hold":
+                    if (
+                        self._client.release_agent(pane_id, SOURCE, mp.agent)
+                        == "ok"
+                    ):
+                        del self.managed[pane_id]
+                else:
+                    # Metadata self-expires via TTL; drop the row either way.
+                    self._client.report_metadata(
+                        pane_id,
+                        SOURCE,
+                        agent=mp.agent,
+                        clear_custom_status=True,
+                    )
+                    del self.managed[pane_id]
             except Exception:
-                log.warning("failed to release %s on shutdown", pane_id, exc_info=True)
-        self.managed.clear()
+                log.warning(
+                    "failed to clean %s on shutdown", pane_id, exc_info=True
+                )
+
+        for pane_id, mp in list(self._legacy_release.items()):
+            try:
+                if (
+                    self._client.release_agent(pane_id, SOURCE, mp.agent)
+                    == "ok"
+                ):
+                    del self._legacy_release[pane_id]
+            except Exception:
+                log.warning(
+                    "failed to release legacy %s on shutdown",
+                    pane_id,
+                    exc_info=True,
+                )
         self._publish()
 
-    def run(self, poll_interval_s: float = 4.0,
-            sleep: Callable[[float], None] = time.sleep) -> None:
-        atexit.register(self.release_all)
-
-        def _handle_term(signum, frame):
-            self.release_all()
-            raise SystemExit(0)
-
-        try:
-            signal.signal(signal.SIGTERM, _handle_term)
-        except (ValueError, OSError):
-            pass  # not main thread; atexit still covers shutdown
-        while True:
-            try:
-                self.tick()
-            except Exception:
-                log.exception("tick failed; continuing")
-            sleep(poll_interval_s)
+    def run(self):
+        raise NotImplementedError("rebuilt in the run-loop task")
 
 
 def build_daemon(config: Config, client=None) -> Daemon:
@@ -283,10 +474,19 @@ def build_daemon(config: Config, client=None) -> Daemon:
     if config.probes.get("ci"):
         probes.append(CIProbe(cache))
     if config.probes.get("bgjobs"):
-        probes.append(BgJobsProbe(process_info=client.pane_process_info,
-                                  min_age_s=config.bgjobs_min_age_s,
-                                  extra_ignore=config.bgjobs_ignore))
-    return Daemon(client, probes, reprobe_interval_s=config.reprobe_interval_s,
-                  allow=config.allow, deny=config.deny,
-                  on_snapshot=StateStore().write,
-                  progress=progress_label if config.progress_enabled else None)
+        probes.append(
+            BgJobsProbe(
+                process_info=client.pane_process_info,
+                min_age_s=config.bgjobs_min_age_s,
+                extra_ignore=config.bgjobs_ignore,
+            )
+        )
+    return Daemon(
+        client,
+        probes,
+        reprobe_interval_s=config.reprobe_interval_s,
+        allow=config.allow,
+        deny=config.deny,
+        on_snapshot=StateStore().write,
+        progress=progress_label if config.progress_enabled else None,
+    )
