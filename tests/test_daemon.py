@@ -2286,7 +2286,10 @@ def test_run_drains_stream_between_due_managed_reprobes():
     except Stop:
         pass
 
-    assert len(client.reports) == 2
+    assert client.reports == [
+        ("w1:p1", "working", "⏳ review"),
+        ("w1:p2", "working", "⏳ review"),
+    ]
     assert checks_since_read["max"] == 1
 
 
