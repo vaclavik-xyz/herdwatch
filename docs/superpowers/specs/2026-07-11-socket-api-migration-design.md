@@ -161,12 +161,16 @@ Main loop (single thread):
    `not_found` error is likewise treated as cleared. If the snapshot
    request itself failed (herdr down), keep all state and retry later — a
    blip must not orphan or drop assertions.
-6. **Reprobe sweep:** every **eligible `idle`/`done` registry pane, managed
-   or not**, at the unchanged 15 s cadence (per-pane throttle). Pending work
-   can begin with no herdr event — a marker added via `herdwatch add` to an
-   already-idle pane, CI triggered late — so sweeping only managed panes
-   would never discover it (today's poll loop probes every idle pane at this
-   cadence; this preserves that). The sweep also refreshes `"done"` metadata
+6. **Reprobe sweep:** at the unchanged 15 s cadence (per-pane throttle),
+   probe **(a) every managed `"hold"` and `"done"` pane and (b) every
+   unmanaged eligible `idle`/`done` registry pane**. Both halves matter:
+   a held pane reports `working` (our own authoritative assertion), so an
+   idle/done status filter alone would never reprobe it and the hold would
+   never release; and pending work can begin with no herdr event — a marker
+   added via `herdwatch add` to an already-idle pane, CI triggered late —
+   so sweeping only managed panes would never discover it (today's poll
+   loop covers both; this preserves that). `"progress"` panes are owned by
+   the progress sweep. The reprobe sweep also refreshes `"done"` metadata
    TTLs (see below).
 7. **Progress sweep (new timer):** progress labels change when the agent's
    local session file changes, which produces **no herdr event** — so
@@ -253,9 +257,10 @@ kinds stay in the state file so `herdwatch status` can show them.
   allow/deny) must keep a test. New tests: done-pane metadata lifecycle,
   TTL refresh + clamp boundaries, self-echo guard, progress sweep (label
   change with no herdr event), unmanaged idle/done pane picked up by the
-  reprobe sweep (late marker), vanished-pane bookkeeping drop vs
-  herdr-down retention, resubscribe on pane-set change, reconnect
-  re-bootstrap, old-server retry loop.
+  reprobe sweep (late marker), held pane (status `working` from our own
+  assertion) still reprobed and released when work clears, vanished-pane
+  bookkeeping drop vs herdr-down retention, resubscribe on pane-set change,
+  reconnect re-bootstrap, old-server retry loop.
 - Live verification against the running herdr 0.7.3 before merge (verify
   skill): idle-edge latency, done-pane ⏳ visible, progress label without
   state masking, daemon restart reconciliation.
