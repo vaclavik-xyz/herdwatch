@@ -617,8 +617,8 @@ class Daemon:
                 for old in public_moves
                 if source_counts[old] == 1 and old in mapping
             }
-            for old in public_moves:
-                mapping.pop(old, None)
+            for pane_id in set(public_moves) | set(public_moves.values()):
+                mapping.pop(pane_id, None)
             for old, value in captured.items():
                 mapping[public_moves[old]] = value
 
@@ -629,12 +629,23 @@ class Daemon:
         }
         for _, pane_id in safe:
             self._adopted.discard(pane_id)
+        moved_managed_targets = []
         for source, mp in rows.items():
             target = candidates[source]
             books[source[0]][target] = mp
+            if source[0] == 0:
+                moved_managed_targets.append(target)
             if source[0] == 0 and source[1] in adopted:
                 self._adopted.add(target)
             log.info("remapped %s -> %s by terminal id", source[1], target)
+        for pane_id in moved_managed_targets:
+            mp = self.managed.get(pane_id)
+            if mp is None or self._eligible(pane_id):
+                continue
+            if mp.kind in SEMANTIC_HOLD_KINDS:
+                self._release_hold(pane_id, "moved to ineligible pane")
+            else:
+                self._clear_metadata(pane_id, "moved to ineligible pane")
 
     def _reconcile_books(
         self, records: dict[str, dict], by_terminal: dict[str, str]

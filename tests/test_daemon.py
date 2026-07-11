@@ -1808,12 +1808,41 @@ def test_resync_remaps_old_terminal_when_pane_id_is_reused():
             }
         ]
     )
+    d._session_cache["w2:p1"] = "stale-target-session"
+    d._last_probe["w2:p1"] = 1.0
+    d._meta_asserted_at["w2:p1"] = 2.0
 
     d._resync()
 
     assert "w1:p1" not in d.managed
     assert d.managed["w2:p1"].terminal_id == "term-old"
     assert client.releases == []
+    assert "w2:p1" not in d._session_cache
+    assert "w2:p1" not in d._last_probe
+    assert "w2:p1" not in d._meta_asserted_at
+
+
+def test_resync_releases_hold_remapped_to_denied_pane():
+    client = FakeClient(
+        [_agent(pane="w2:p1", status="idle", term="term-old")]
+    )
+    d = make_daemon(client, deny=["w2:p1"])
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+                "terminal_id": "term-old",
+            }
+        ]
+    )
+
+    d._resync()
+
+    assert d.managed == {}
+    assert client.releases == ["w2:p1"]
 
 
 def test_resync_atomically_swaps_two_tracked_pane_ids():
