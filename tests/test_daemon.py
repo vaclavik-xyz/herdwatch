@@ -2154,7 +2154,19 @@ def test_run_drains_status_event_between_reprobe_panes():
 
 def test_run_fast_probes_new_agent_discovered_between_panes():
     order = []
-    stream = FakeStream()
+
+    class BoundedStream(FakeStream):
+        def __init__(self):
+            super().__init__()
+            self.read_limits = []
+
+        def read_events(self, *, max_chunks=None):
+            self.read_limits.append(max_chunks)
+            if max_chunks is None:
+                raise AssertionError("event drains must have a chunk budget")
+            return super().read_events(max_chunks=max_chunks)
+
+    stream = BoundedStream()
 
     class StopClient(FakeClient):
         def report_agent(
@@ -2217,6 +2229,9 @@ def test_run_fast_probes_new_agent_discovered_between_panes():
 
     assert client.reports == [("w1:p2", "working", "⏳ marker")]
     assert "w1:p3" not in order
+    assert stream.read_limits and all(
+        limit in (0, 1) for limit in stream.read_limits
+    )
 
 
 def test_run_drains_startup_replay_before_running_slow_probes():

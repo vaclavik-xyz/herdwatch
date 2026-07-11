@@ -1160,7 +1160,7 @@ class Daemon:
             if stream is None or stream.closed:
                 return False
             before_ids = set(self._registry)
-            messages = stream.read_events()
+            messages = stream.read_events(max_chunks=1)
             if messages:
                 backoff = self._backoff_base
             for message in messages:
