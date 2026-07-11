@@ -2152,6 +2152,76 @@ def test_run_drains_status_event_between_reprobe_panes():
     assert "w1:p3" not in order
 
 
+def test_run_rechecks_managed_hold_when_probe_sweep_outlives_interval():
+    now = {"value": 0.0}
+    expires_at = {"value": None}
+    released_at = {"value": None}
+
+    def clock():
+        now["value"] += 0.25
+        if (
+            released_at["value"] is not None
+            and now["value"] > released_at["value"] + 0.5
+        ):
+            raise Stop()
+        if now["value"] > 100.0:
+            raise AssertionError("managed hold was never rechecked")
+        return now["value"]
+
+    class TimingClient(FakeClient):
+        def report_agent(
+            self, pane_id, source, agent, state, custom_status=None
+        ):
+            expires_at["value"] = now["value"] + 5.0
+            return super().report_agent(
+                pane_id, source, agent, state, custom_status
+            )
+
+        def release_agent(self, pane_id, source, agent):
+            released_at["value"] = now["value"]
+            return super().release_agent(pane_id, source, agent)
+
+    client = TimingClient(
+        [
+            _agent(pane="w1:p1", status="idle"),
+            _agent(pane="w1:p2", status="idle"),
+            _agent(pane="w1:p3", status="idle"),
+        ]
+    )
+
+    class ExpiringMarkerWithSlowMisses:
+        name = "marker"
+
+        def check(self, ctx):
+            if ctx.pane_id == "w1:p1":
+                if (
+                    expires_at["value"] is None
+                    or now["value"] < expires_at["value"]
+                ):
+                    return Pending("marker", 40, "marker")
+                return None
+            now["value"] += 8.0
+            return None
+
+    d = make_daemon(
+        client,
+        [ExpiringMarkerWithSlowMisses()],
+        stream_factory=lambda subs: FakeStream(subs),
+        clock=clock,
+        reprobe_interval_s=15.0,
+        resync_interval_s=999.0,
+        progress_interval_s=0.0,
+    )
+
+    try:
+        d.run(sleep=lambda delay: None)
+    except Stop:
+        pass
+
+    assert released_at["value"] is not None
+    assert released_at["value"] - expires_at["value"] <= 15.0
+
+
 def test_run_fast_probes_new_agent_discovered_between_panes():
     order = []
 

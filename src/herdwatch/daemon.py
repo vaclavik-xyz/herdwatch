@@ -1178,6 +1178,13 @@ class Daemon:
                         rec = self._registry.get(pane_id) or {}
                         if rec.get("agent_status") in ("idle", "done"):
                             self._probe_pane(pane_id, fast=True)
+            if self._stream is stream and not stream.closed and self._reprobe > 0:
+                # A full sweep can outlive the reprobe interval when external
+                # probes are slow. Keep already-managed panes on their own
+                # interval so an expired marker is not delayed by the rest of
+                # the registry plus another complete interval.
+                for pane_id in list(self.managed):
+                    self._probe_pane(pane_id)
             return self._stream is stream and not stream.closed
 
         while True:
