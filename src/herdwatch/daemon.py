@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from . import gitctx
+from . import gitctx, herdr_socket
 from .aggregate import aggregate
 from .cache import TTLCache
 from .config import Config
@@ -927,8 +927,11 @@ def build_daemon(config: Config, client=None) -> Daemon:
         client,
         probes,
         reprobe_interval_s=config.reprobe_interval_s,
+        resync_interval_s=config.resync_interval_s,
+        progress_interval_s=config.progress_interval_s,
         allow=config.allow,
         deny=config.deny,
         on_snapshot=StateStore().write,
         progress=progress_label if config.progress_enabled else None,
+        stream_factory=lambda subscriptions: herdr_socket.EventStream(subscriptions),
     )

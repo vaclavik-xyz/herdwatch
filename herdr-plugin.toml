@@ -6,7 +6,7 @@
 id = "herdwatch"
 name = "herdwatch"
 version = "0.1.0"
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.7.2"
 description = "Keep panes shown as working with a ⏳ status while background work (CI, review, jobs) is still pending after the agent goes idle."
 platforms = ["macos", "linux"]
 

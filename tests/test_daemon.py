@@ -1815,3 +1815,19 @@ def test_run_registers_shutdown_and_sigterm_cleans_owned_hold(monkeypatch):
         pass
     assert client.releases == ["w1:p1"]
     assert d.managed == {}
+
+
+def test_build_daemon_constructs_with_new_wiring():
+    from herdwatch.config import Config
+    from herdwatch.daemon import build_daemon
+
+    class FakeC:
+        def pane_process_info(self, pid):
+            return {}
+
+    cfg = Config(resync_interval_s=90.0, progress_interval_s=2.0)
+    d = build_daemon(cfg, client=FakeC())
+    assert len(d._probes) == 3
+    assert d._resync_interval == 90.0
+    assert d._progress_interval == 2.0
+    assert d._stream_factory is not None
