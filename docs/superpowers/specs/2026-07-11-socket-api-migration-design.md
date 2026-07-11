@@ -147,12 +147,27 @@ Main loop (single thread):
    clears the pane's probe throttle so the probe runs immediately.
 4. **Lifecycle event:** schedule resync now.
 5. **Resync (timer ~`resync_interval_s`, default 60 s, and after every
-   reconnect/lifecycle event):** `session.snapshot`; release managed panes
-   that vanished (as today's "vanished from agent list"); replace registry;
-   if the pane set changed, open a replacement `EventStream` and close the
-   old one; drop stale `_last_probe`/`_session_cache` entries.
-6. **Reprobe sweep:** unchanged 15 s cadence per managed pane; also
-   refreshes `"done"` metadata TTLs (see below).
+   reconnect/lifecycle event):** `session.snapshot`; reconcile vanished
+   managed panes (below); replace registry; if the pane set changed, open a
+   replacement `EventStream` and close the old one; drop stale
+   `_last_probe`/`_session_cache` entries.
+
+   **Vanished panes:** when a *successful* snapshot lacks a managed pane,
+   herdr itself has dropped the pane (and any assertion on it) — make one
+   best-effort release/clear and **drop the bookkeeping regardless of the
+   outcome**; retrying against a nonexistent pane would leave a stale
+   managed entry forever. Retry-on-failed-release applies only to panes the
+   snapshot still contains. A release/clear that returns a structured
+   `not_found` error is likewise treated as cleared. If the snapshot
+   request itself failed (herdr down), keep all state and retry later — a
+   blip must not orphan or drop assertions.
+6. **Reprobe sweep:** every **eligible `idle`/`done` registry pane, managed
+   or not**, at the unchanged 15 s cadence (per-pane throttle). Pending work
+   can begin with no herdr event — a marker added via `herdwatch add` to an
+   already-idle pane, CI triggered late — so sweeping only managed panes
+   would never discover it (today's poll loop probes every idle pane at this
+   cadence; this preserves that). The sweep also refreshes `"done"` metadata
+   TTLs (see below).
 7. **Progress sweep (new timer):** progress labels change when the agent's
    local session file changes, which produces **no herdr event** — so
    event-driven alone would never update them. A dedicated sweep (default
@@ -179,7 +194,10 @@ per-pane probe throttle is the backstop against any remaining loop.
 | `working` (claude, active task list) | — | `report_metadata custom_status=<progress>` + same TTL pattern (was `report_agent working`) |
 | `working`, task list gone | — | `report_metadata clear_custom_status` |
 
-TTL = `2 × reprobe_interval_s × 1000` ms. Because metadata self-expires,
+TTL = `2 × reprobe_interval_s × 1000` ms, clamped to herdr's accepted
+`ttl_ms` range — effectively `[1000, 86_400_000]` — so a misconfigured
+`reprobe_interval_s` (0, negative, > 12 h) cannot produce an invalid
+request. Because metadata self-expires,
 `"progress"` and `"done"` kinds are **not re-adopted** after a crash — TTL
 cleans up orphans, and the next event/resync re-asserts if still warranted.
 Only `"hold"` (a semantic assertion with no TTL) keeps the adopt path. All
@@ -233,9 +251,11 @@ kinds stay in the state file so `herdwatch status` can show them.
   with a fake client + fake stream. Every current behavior
   (throttle, adopt, failed release retry, vanished panes, progress,
   allow/deny) must keep a test. New tests: done-pane metadata lifecycle,
-  TTL refresh, self-echo guard, progress sweep (label change with no herdr
-  event), resubscribe on pane-set change, reconnect re-bootstrap,
-  old-server retry loop.
+  TTL refresh + clamp boundaries, self-echo guard, progress sweep (label
+  change with no herdr event), unmanaged idle/done pane picked up by the
+  reprobe sweep (late marker), vanished-pane bookkeeping drop vs
+  herdr-down retention, resubscribe on pane-set change, reconnect
+  re-bootstrap, old-server retry loop.
 - Live verification against the running herdr 0.7.3 before merge (verify
   skill): idle-edge latency, done-pane ⏳ visible, progress label without
   state masking, daemon restart reconciliation.
