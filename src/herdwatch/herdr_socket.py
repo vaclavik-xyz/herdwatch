@@ -184,6 +184,11 @@ class EventStream:
                     line, self._buf = self._buf.split(b"\n", 1)
                     if not line.strip():
                         continue
+                    # Enforce max line size: reject lines exceeding _MAX_RESPONSE_SIZE
+                    if len(line) > _MAX_RESPONSE_SIZE:
+                        self.closed = True
+                        self._buf = b""
+                        return events
                     try:
                         events.append(json.loads(line))
                     except ValueError:
@@ -204,6 +209,11 @@ class EventStream:
             line, self._buf = self._buf.split(b"\n", 1)
             if not line.strip():
                 continue
+            # Enforce max line size for remaining lines
+            if len(line) > _MAX_RESPONSE_SIZE:
+                self.closed = True
+                self._buf = b""
+                break
             try:
                 events.append(json.loads(line))
             except ValueError:

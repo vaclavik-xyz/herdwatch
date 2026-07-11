@@ -508,6 +508,63 @@ def test_event_stream_caps_buffer_on_missing_newline(sock_dir):
         srv.close()
 
 
+def test_event_stream_rejects_oversized_complete_line(sock_dir):
+    """Regression: stream should close if a complete line exceeds max-response-size."""
+    path = str(sock_dir / "oversized_line.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def send_oversized_complete_line():
+        conn, _ = srv.accept()
+        # Read subscription request
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+        # Send subscription ACK
+        ack = {"id": "sub", "result": {"type": "subscription_started"}}
+        conn.sendall(json.dumps(ack).encode() + b"\n")
+
+        # Send a valid event followed by an oversized complete line (with newline)
+        valid_event = {"event": "pane.created", "data": {"id": "test"}}
+        conn.sendall(json.dumps(valid_event).encode() + b"\n")
+
+        # Send an oversized complete line: just 1MB+ of data with a newline at the end
+        oversized_line = b"x" * (1024 * 1024 + 10000) + b"\n"
+        try:
+            conn.sendall(oversized_line)
+            time.sleep(10)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=send_oversized_complete_line, daemon=True)
+    t.start()
+    try:
+        stream = EventStream([{"type": "pane.created"}], socket_path=path)
+        try:
+            # Read available events
+            events = _wait_events(stream, want=1, timeout=2.0)
+            assert events == [{"event": "pane.created", "data": {"id": "test"}}]
+
+            # Keep reading to get to the oversized line
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not stream.closed:
+                stream.read_events()
+                time.sleep(0.001)
+
+            # The stream should detect the oversized line and close
+            assert stream.closed
+        finally:
+            stream.close()
+    finally:
+        srv.close()
+
+
 def test_event_stream_caps_buffer_when_incomplete_suffix_oversized(sock_dir):
     """Regression: stream should close if incomplete suffix after complete line exceeds max-response-size."""
     path = str(sock_dir / "oversized_suffix.sock")
