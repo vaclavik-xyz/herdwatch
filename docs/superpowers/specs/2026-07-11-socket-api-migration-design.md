@@ -45,8 +45,12 @@ These shaped the design; implementers should not need to re-derive them:
   `~/.config/herdr/herdr.sock`.
 - `pane.agent_status_changed` subscriptions are **per-pane** (`pane_id`
   required); there is no global variant. Global subscriptions used here:
-  `pane.created`, `pane.closed`, `pane.exited`, `pane.agent_detected`,
-  `pane.moved`, `workspace.closed`, `tab.closed`.
+  `pane.created`, `pane.closed`, `pane.exited`, `pane.moved`,
+  `workspace.closed`, `tab.closed`. `pane.agent_detected` is deliberately
+  omitted on herdr 0.7.3; its retained replay destabilizes the shared status
+  stream. Status subscriptions cover every snapshot pane, including panes
+  whose current agent state is `unknown`, so the following status edge still
+  triggers immediate discovery and resync.
 - A cross-workspace `pane.move` keeps the internal pane (and any agent
   assertion on it) alive but assigns a **new public pane id**; herdr emits
   `pane.moved` (payload carries `previous_pane_id` and the new `pane`
@@ -100,9 +104,9 @@ These shaped the design; implementers should not need to re-derive them:
 5. **Events are triggers, snapshots are truth.** Only `agent_status_changed`
    (hot path) and `pane.moved` (bookkeeping remap — a resync would
    misclassify the old id as vanished) are handled incrementally. All other
-   lifecycle events (`pane.created`, `pane.closed`, `pane.exited`,
-   `pane.agent_detected`, `workspace.closed`, `tab.closed`) merely schedule
-   an immediate resync + resubscribe. This avoids incremental-registry bugs.
+   subscribed lifecycle events (`pane.created`, `pane.closed`, `pane.exited`,
+   `workspace.closed`, `tab.closed`) merely schedule an immediate resync +
+   resubscribe. This avoids incremental-registry bugs.
 
 ## Architecture
 
@@ -336,10 +340,11 @@ kinds stay in the state file so `herdwatch status` can show them.
   (0.5 s base, 30 s cap; herdeck `connector.py` pattern), then full
   re-bootstrap (snapshot + subscribe + sweep). Log once per distinct failure
   reason, not per retry.
-- **Retained lifecycle replay** → ignore redundant `pane.agent_detected`
-  records, validate `pane.moved` against the stable `terminal_id`, and coalesce
-  the remaining lifecycle triggers behind a 250 ms selector deadline. This
-  keeps the socket reader live while herdr 0.7.3 replays its retained event hub.
+- **Retained lifecycle replay** → do not subscribe to the noisy
+  `pane.agent_detected` feed on herdr 0.7.3, validate `pane.moved` against the
+  stable `terminal_id`, and coalesce lifecycle triggers behind a 250 ms
+  selector deadline. Status events are verified against `agent.get`, so a
+  retained stale status cannot overwrite snapshot truth.
 - **Semantic report silently ignored** → `report_agent` reads back
   `agent_status`/`custom_status`; an official foreign `agent_session.source` is
   handled as metadata-only up front, so herdwatch never issues the dangerous
@@ -368,6 +373,10 @@ kinds stay in the state file so `herdwatch status` can show them.
 - `poll_interval_s` — no longer used; if present in config, log a one-line
   deprecation notice and ignore it. `reprobe_interval_s` unchanged.
 - `herdr-plugin.toml`: `min_herdr_version = "0.7.2"`.
+- Per-pane status subscriptions are created for every pane in the snapshot,
+  not only entries already present in `snapshot.agents`. This preserves live
+  discovery when an `unknown` pane starts an agent while avoiding herdr
+  0.7.3's replay-broken generic detection feed.
 - `doctor` gains two required checks driven by one `session.snapshot`
   round-trip: "herdr socket reachable" (any response, even an error, proves
   the socket) and "herdr ≥ 0.7.2" (the snapshot being accepted proves the

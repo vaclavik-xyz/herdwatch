@@ -25,14 +25,19 @@ releases it the moment the work clears.
 herdwatch is a standalone background daemon — **not** a herdr fork and not a
 screen-scraper. It requires **herdr ≥ 0.7.2** and talks directly to herdr's
 socket API. It bootstraps from `session.snapshot`, subscribes to herdr's socket
-events (`pane.agent_status_changed` per pane plus lifecycle events), reacts to
-idle/done edges within ~100 ms, and re-verifies against a fresh snapshot every
+events (`pane.agent_status_changed` for every pane plus lifecycle events),
+reacts to idle/done edges within ~100 ms, and re-verifies against a fresh snapshot every
 `resync_interval_s` (60 s by default), so correctness never depends on seeing
 every event. Retained lifecycle-event replays are coalesced before that snapshot,
 so the subscription stays drained. For idle panes, herdwatch runs a set of
 probes; while any probe is pending it requests `working` + a `⏳` label via
 `pane.report_agent` and reads the state back before recording ownership. No
 changes to herdr or per-agent setup are needed.
+
+On herdr 0.7.3, herdwatch deliberately replaces the replay-heavy global
+`pane.agent_detected` feed with status subscriptions on all panes, including
+currently unknown ones. The first `unknown → working` edge still triggers an
+immediate snapshot, without destabilizing status delivery for known agents.
 
 A pane herdr reports as `done` keeps that semantic state. If work is still
 pending, herdwatch adds a **display-only** `⏳` label via

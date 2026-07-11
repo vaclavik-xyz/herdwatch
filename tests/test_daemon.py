@@ -122,6 +122,7 @@ def make_daemon(client, probes=(), **kw):
 def seed(d, client):
     """Load the fake's agents into the registry (what bootstrap/resync do)."""
     d._registry = {pane: dict(agent) for pane, agent in client.agents.items()}
+    d._subscribed_pane_ids = set(d._registry)
     for rec in d._registry.values():
         d._remember_record(rec)
 
@@ -1756,11 +1757,62 @@ def test_bootstrap_subscribes_then_snapshots():
         "pane.created",
         "pane.closed",
         "pane.exited",
-        "pane.agent_detected",
         "pane.moved",
         "workspace.closed",
         "tab.closed",
     } <= globals_
+    assert "pane.agent_detected" not in globals_
+
+
+def test_bootstrap_subscribes_status_for_unknown_panes():
+    known = _agent(status="idle")
+    client = FakeClient([known])
+    client.session_snapshot = lambda: {
+        "agents": [dict(known)],
+        "panes": [
+            {"pane_id": "w1:p1"},
+            {"pane_id": "w1:p2"},
+        ],
+    }
+    made = []
+    d = make_daemon(
+        client,
+        stream_factory=lambda subs: made.append(subs) or FakeStream(subs),
+    )
+
+    assert d.bootstrap() is True
+
+    per_pane = {
+        sub["pane_id"]
+        for sub in made[0]
+        if sub.get("type") == "pane.agent_status_changed"
+    }
+    assert per_pane == {"w1:p1", "w1:p2"}
+    assert set(d._registry) == {"w1:p1"}
+
+
+def test_resync_discovers_agent_in_already_subscribed_unknown_pane():
+    known = _agent(status="idle")
+    discovered = _agent(pane="w1:p2", status="working")
+    snapshot = {
+        "agents": [dict(known)],
+        "panes": [{"pane_id": "w1:p1"}, {"pane_id": "w1:p2"}],
+    }
+    client = FakeClient([known])
+    client.session_snapshot = lambda: snapshot
+    d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
+    assert d.bootstrap() is True
+    stream = d._stream
+
+    snapshot = {
+        "agents": [dict(known), dict(discovered)],
+        "panes": [{"pane_id": "w1:p1"}, {"pane_id": "w1:p2"}],
+    }
+    d._resync()
+
+    assert set(d._registry) == {"w1:p1", "w1:p2"}
+    assert d._stream is stream
+    assert stream.closed is False
 
 
 def test_bootstrap_retries_when_pane_set_drifts():

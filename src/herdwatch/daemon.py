@@ -30,11 +30,16 @@ GLOBAL_SUBSCRIPTIONS = [
     {"type": "pane.created"},
     {"type": "pane.closed"},
     {"type": "pane.exited"},
-    {"type": "pane.agent_detected"},
     {"type": "pane.moved"},
     {"type": "workspace.closed"},
     {"type": "tab.closed"},
 ]
+# Herdr 0.7.3 starts generic event cursors at zero and emits at most one
+# retained event of each type per 100 ms loop. pane.agent_detected is noisy
+# enough to replay for tens of seconds and then trip the server's macOS EAGAIN
+# bug, repeatedly destroying the status stream. Subscribing to status changes
+# for every pane (including unknown ones) preserves immediate agent discovery
+# without that replay-broken generic feed.
 # herdr emits dotted kinds on subscription events and snake_case kinds on
 # generic lifecycle events; accept both spellings for each
 LIFECYCLE_RESYNC_KINDS = {
@@ -112,6 +117,7 @@ class Daemon:
         self._legacy_release: dict[str, ManagedPane] = {}
         # Last known agent records, keyed by pane_id (snapshot is truth).
         self._registry: dict[str, dict] = {}
+        self._subscribed_pane_ids: set[str] = set()
         self._last_probe: dict[str, float] = {}
         # herdr reports agent_session only for idle/done panes, never while a
         # pane is working -- exactly when the progress path needs it. Cache it
@@ -228,6 +234,22 @@ class Daemon:
         ]
         return subscriptions
 
+    @staticmethod
+    def _snapshot_pane_ids(snapshot: dict) -> set[str]:
+        """Return every pane that can carry a per-pane status subscription.
+
+        Real session snapshots expose all panes separately from detected
+        agents. Falling back to agents keeps transport fakes and older recorded
+        fixtures useful without weakening the live behavior.
+        """
+        panes = snapshot.get("panes")
+        rows = panes if isinstance(panes, list) else snapshot.get("agents", [])
+        return {
+            row["pane_id"]
+            for row in rows
+            if isinstance(row, dict) and row.get("pane_id")
+        }
+
     def bootstrap(self) -> bool:
         """Subscribe between two snapshots and seed the registry from truth."""
         if self._stream_factory is None:
@@ -245,13 +267,11 @@ class Daemon:
             except HerdrUnavailable as exc:
                 self._log_boot_failure(f"herdr unreachable: {exc}")
                 return False
-            pane_ids = [
-                agent["pane_id"]
-                for agent in snapshot.get("agents", [])
-                if agent.get("pane_id")
-            ]
+            pane_ids = self._snapshot_pane_ids(snapshot)
             try:
-                stream = self._stream_factory(self._subscriptions_for(pane_ids))
+                stream = self._stream_factory(
+                    self._subscriptions_for(sorted(pane_ids))
+                )
             except HerdrApiError as exc:
                 log.info(
                     "subscribe rejected (%s); retrying with a fresh snapshot",
@@ -272,11 +292,12 @@ class Daemon:
                 for agent in snapshot.get("agents", [])
                 if agent.get("pane_id")
             }
-            if set(records) != set(pane_ids):
+            if self._snapshot_pane_ids(snapshot) != pane_ids:
                 stream.close()
                 continue
             self._stream = stream
             self._registry = records
+            self._subscribed_pane_ids = pane_ids
             for record in records.values():
                 self._remember_record(record)
             by_terminal = {
@@ -613,9 +634,7 @@ class Daemon:
             for a in snap.get("agents", [])
             if a.get("pane_id")
         }
-        # captured BEFORE reconciliation: _remap mutates the registry, and a
-        # post-remap comparison would miss the pane-id change entirely
-        before_ids = set(self._registry)
+        subscribed_pane_ids = self._snapshot_pane_ids(snap)
         by_terminal = {
             a["terminal_id"]: pid
             for pid, a in records.items()
@@ -623,7 +642,6 @@ class Daemon:
         }
         self._backfill_legacy_terminals(records)
         self._reconcile_books(records, by_terminal)
-        pane_set_changed = set(records) != before_ids
         self._registry = records
         for rec in records.values():
             self._remember_record(rec)
@@ -635,7 +653,10 @@ class Daemon:
             for pane_id in list(mapping):
                 if pane_id not in records:
                     mapping.pop(pane_id, None)
-        if pane_set_changed and self._stream is not None:
+        if (
+            subscribed_pane_ids != self._subscribed_pane_ids
+            and self._stream is not None
+        ):
             self._stream.close()
             self._stream = None  # run loop re-bootstraps with the new pane set
         self._publish()
