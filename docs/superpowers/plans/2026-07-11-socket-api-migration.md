@@ -2874,6 +2874,30 @@ No new code — an end-to-end check on this machine (herdr 0.7.3 runs locally wi
 - [ ] **Step 5:** Restart resilience: `kill -9` the daemon while it holds a pane; restart it; the pane must be re-adopted (still ⏳, no orphan after work clears). Then `herdr server stop` + restart herdr while the daemon runs; the daemon must reconnect and re-assert within the backoff window.
 - [ ] **Step 6:** Record results (pane ids, observed latencies, anomalies) in the PR/merge description. Reinstall the launchd service if it was unloaded.
 
+#### Live verification results (2026-07-11, herdr 0.7.3)
+
+- Installed this branch into `.venv` and reinstalled launchd. All required and
+  optional `herdwatch doctor --json` checks passed; the service was left
+  running as PID 94792.
+- On scratch pane `wX:p1`, an unknown -> working -> idle transition acquired a
+  marker hold in 0.587 s. A 5 s TTL marker was released 23.081 s after it was
+  added (the next sweep), leaving no managed row or label. Because the scratch
+  reporter was synthetic, releasing its assertion returned the pane to
+  `unknown`; a real integration would report its underlying idle state again.
+- On unfocused scratch pane `wZ:p1`, pending work preserved semantic `done` and
+  added `⏳ live done edge` in 0.758 s. Focusing the pane handed the display
+  metadata over to a semantic `working ⏳` hold in 0.581 s.
+- Killing launchd PID 68038 with SIGKILL produced PID 94792 in 0.011 s. The
+  existing hold stayed visible and the new daemon adopted its managed row; it
+  later cleared without an orphan.
+- Server restart was exercised in an isolated named session
+  (`herdwatch-e2e`) with a separate HOME, so the default session and its real
+  panes were not stopped. The daemon entered backoff while the socket was
+  absent, reconnected after restart, discarded the stale hold when herdr
+  restored the pane with a new `terminal_id`, and reasserted in 0.020 s after
+  the synthetic integration registered the restored pane. The named session,
+  scratch HOME, markers, and workspaces were removed afterward.
+
 ---
 
 ## Final integration
