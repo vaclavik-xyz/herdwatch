@@ -346,6 +346,14 @@ def test_event_stream_can_bound_reads_to_one_socket_chunk():
     assert stream.read_events(max_chunks=1) == [second]
 
 
+def test_event_stream_exposes_incomplete_buffered_event():
+    stream = _stream_with_chunks()
+    stream._buf = b'{"event":"partial"'
+
+    assert stream.read_events(max_chunks=0) == []
+    assert stream.has_buffered_data is True
+
+
 def test_event_stream_sets_closed_on_eof(server):
     stream = EventStream([{"type": "pane.created"}], socket_path=server.path)
     try:

@@ -333,15 +333,19 @@ class Daemon:
         if stream.closed:
             return "closed", 0
         drained = len(buffered)
-        if buffered:
+        if buffered or stream.has_buffered_data:
             quiet_until = self._clock() + quiet_s
         while True:
             now = self._clock()
             if now >= stop_at:
                 return "timeout", drained
-            if now >= quiet_until:
+            if now >= quiet_until and not stream.has_buffered_data:
                 return "quiet", drained
-            deadline = min(quiet_until, stop_at)
+            deadline = (
+                stop_at
+                if now >= quiet_until
+                else min(quiet_until, stop_at)
+            )
             ready = selector.select(max(0.0, deadline - now))
             if not ready:
                 continue

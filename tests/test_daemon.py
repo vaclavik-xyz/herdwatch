@@ -1059,6 +1059,10 @@ class FakeStream:
     def fileno(self):
         return self._r.fileno()
 
+    @property
+    def has_buffered_data(self):
+        return False
+
     def read_events(self, *, max_chunks=None):
         if max_chunks == 0:
             return []
@@ -1999,6 +2003,31 @@ def test_startup_replay_drain_stops_at_hard_max():
     outcome, drained = result
     assert outcome == "timeout"
     assert 0 < drained < 40
+
+
+def test_startup_replay_partial_buffer_cannot_be_declared_quiet():
+    class PartialBufferedStream(FakeStream):
+        @property
+        def has_buffered_data(self):
+            return True
+
+    stream = PartialBufferedStream()
+    d = make_daemon(
+        FakeClient(),
+        clock=time.monotonic,
+        startup_replay_quiet_s=0.005,
+        startup_replay_max_s=0.02,
+    )
+    selector = selectors.DefaultSelector()
+    selector.register(stream, selectors.EVENT_READ)
+    try:
+        outcome, drained = d._drain_startup_replay(selector, stream)
+    finally:
+        selector.close()
+        stream.close()
+
+    assert outcome == "timeout"
+    assert drained == 0
 
 
 def test_run_reconnects_without_probing_when_startup_replay_times_out():

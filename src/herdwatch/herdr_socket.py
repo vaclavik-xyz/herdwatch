@@ -172,6 +172,11 @@ class EventStream:
     def fileno(self) -> int:
         return self._sock.fileno()
 
+    @property
+    def has_buffered_data(self) -> bool:
+        """Whether an incomplete event line is waiting for more bytes."""
+        return bool(self._buf)
+
     def read_events(self, *, max_chunks: int | None = None) -> list[dict]:
         """Drain complete event lines without blocking. On EOF or a socket
         error, parse what remains and set `closed`. ``max_chunks`` bounds
