@@ -232,6 +232,18 @@ def test_request_raises_unavailable_on_oversized_response(sock_dir):
         srv.close()
 
 
+def test_request_accepts_response_line_exactly_at_size_limit(
+    sock_dir, monkeypatch
+):
+    reply = b'{"result":{}}'
+    monkeypatch.setattr(herdr_socket, "_MAX_RESPONSE_SIZE", len(reply))
+    server = FakeServer(sock_dir, responses={"exact.response": reply})
+    try:
+        assert request("exact.response", {}, socket_path=server.path) == {}
+    finally:
+        server.close()
+
+
 def test_request_closes_socket_with_zero_timeout():
     # Verify socket is properly closed even when timeout_s=0 expires before connect
     from unittest.mock import patch, MagicMock
@@ -373,6 +385,27 @@ def test_event_stream_send_uses_remaining_ack_deadline(monkeypatch):
         assert sock.send_timeout == pytest.approx(0.5)
     finally:
         stream.close()
+
+
+def test_event_stream_accepts_ack_line_exactly_at_size_limit(
+    sock_dir, monkeypatch
+):
+    ack = {"result": {"type": "subscription_started"}}
+    wire_ack = dict(ack)
+    wire_ack["id"] = "herdwatch-sub"
+    limit = len(json.dumps(wire_ack).encode())
+    monkeypatch.setattr(herdr_socket, "_MAX_RESPONSE_SIZE", limit)
+    server = FakeServer(sock_dir, subscribe_ack=ack)
+    stream = None
+    try:
+        stream = EventStream(
+            [{"type": "pane.created"}], socket_path=server.path
+        )
+        assert stream.closed is False
+    finally:
+        if stream is not None:
+            stream.close()
+        server.close()
 
 
 def test_event_stream_buffers_partial_lines(server):

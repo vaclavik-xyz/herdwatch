@@ -19,6 +19,13 @@ _RECV_CHUNK = 65536
 _MAX_RESPONSE_SIZE = 1024 * 1024  # 1MB max for a single NDJSON line
 
 
+def _first_line_exceeds_limit(buf: bytes) -> bool:
+    """Measure the NDJSON payload, excluding its line terminator."""
+    newline = buf.find(b"\n")
+    length = newline if newline >= 0 else len(buf)
+    return length > _MAX_RESPONSE_SIZE
+
+
 class HerdrUnavailable(Exception):
     """herdr server unreachable: connect failure, timeout, or EOF."""
 
@@ -101,7 +108,7 @@ def request(method: str, params: dict, *, socket_path: str | None = None,
             if not chunk:
                 raise HerdrUnavailable("connection closed before response")
             buf += chunk
-            if len(buf) > _MAX_RESPONSE_SIZE:
+            if _first_line_exceeds_limit(buf):
                 raise HerdrUnavailable(f"response line exceeds {_MAX_RESPONSE_SIZE} bytes")
 
     return _parse_response(buf.split(b"\n", 1)[0])
@@ -148,7 +155,7 @@ class EventStream:
                 if not chunk:
                     raise HerdrUnavailable("connection closed before subscribe ack")
                 self._buf += chunk
-                if len(self._buf) > _MAX_RESPONSE_SIZE:
+                if _first_line_exceeds_limit(self._buf):
                     raise HerdrUnavailable(f"subscribe ack line exceeds {_MAX_RESPONSE_SIZE} bytes")
         except HerdrUnavailable:
             self.close()
