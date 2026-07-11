@@ -18,8 +18,8 @@ class FakeServer:
     """Minimal herdr-like ndjson unix-socket server: one request per
     connection, scripted response per method."""
 
-    def __init__(self, tmp_path, responses=None):
-        self.path = str(tmp_path / "herdr.sock")
+    def __init__(self, sock_dir, responses=None):
+        self.path = str(sock_dir / "herdr.sock")
         self.responses = responses or {}
         self.requests = []
         self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -68,8 +68,8 @@ class FakeServer:
 
 
 @pytest.fixture
-def server(tmp_path):
-    srv = FakeServer(tmp_path, responses={
+def server(sock_dir):
+    srv = FakeServer(sock_dir, responses={
         "ping": {"result": {"type": "pong"}},
     })
     yield srv
@@ -103,14 +103,14 @@ def test_request_raises_api_error(server):
     assert exc.value.code == "unknown_method"
 
 
-def test_request_raises_unavailable_when_no_socket(tmp_path):
+def test_request_raises_unavailable_when_no_socket(sock_dir):
     with pytest.raises(HerdrUnavailable):
-        request("ping", {}, socket_path=str(tmp_path / "missing.sock"))
+        request("ping", {}, socket_path=str(sock_dir / "missing.sock"))
 
 
-def test_request_raises_unavailable_on_eof(tmp_path):
+def test_request_raises_unavailable_on_eof(sock_dir):
     # server that accepts and closes without responding
-    path = str(tmp_path / "dead.sock")
+    path = str(sock_dir / "dead.sock")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(1)
@@ -128,9 +128,9 @@ def test_request_raises_unavailable_on_eof(tmp_path):
         srv.close()
 
 
-def test_request_raises_unavailable_on_oversized_response(tmp_path):
+def test_request_raises_unavailable_on_oversized_response(sock_dir):
     # server that sends data without newline exceeding the size limit
-    path = str(tmp_path / "bloat.sock")
+    path = str(sock_dir / "bloat.sock")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(1)
@@ -179,11 +179,11 @@ def test_request_closes_socket_with_zero_timeout():
         assert "timeout" in str(exc.value).lower()
 
 
-def test_request_raises_unavailable_on_slow_drip(tmp_path):
+def test_request_raises_unavailable_on_slow_drip(sock_dir):
     # server that sends data very slowly (slowly drip attack):
     # each byte within timeout but unbounded total time
     import time
-    path = str(tmp_path / "slow.sock")
+    path = str(sock_dir / "slow.sock")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(1)
@@ -192,10 +192,15 @@ def test_request_raises_unavailable_on_slow_drip(tmp_path):
         conn, _ = srv.accept()
         # Send 1KB of data, 1 byte per recv call with pauses
         # Each pause is less than timeout, but total time exceeds it
-        for i in range(1024):
-            conn.send(b"x")
-            time.sleep(0.5)  # 0.5s per byte = 512s total >> 1s timeout
-        conn.close()
+        try:
+            for i in range(1024):
+                conn.send(b"x")
+                time.sleep(0.5)  # 0.5s per byte = 512s total >> 1s timeout
+        except OSError:
+            # Client closed or connection error; exit cleanly
+            pass
+        finally:
+            conn.close()
 
     t = threading.Thread(target=send_slow_drip, daemon=True)
     t.start()
