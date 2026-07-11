@@ -959,7 +959,11 @@ class Daemon:
 
     # ---------- sweeps ----------
 
-    def _reprobe_sweep(self) -> None:
+    def _reprobe_sweep(
+        self, yield_control: Callable[[], None] | None = None
+    ) -> None:
+        yield_now = yield_control or (lambda: None)
+        yield_now()
         for pane_id, mp in list(self._legacy_release.items()):
             owner = self._foreign_session_owner(pane_id)
             if owner is not None:
@@ -970,6 +974,7 @@ class Daemon:
                     pane_id,
                     owner,
                 )
+                yield_now()
                 continue
             outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
             if outcome == "ok":
@@ -977,24 +982,30 @@ class Daemon:
                 log.info("released legacy assertion on %s", pane_id)
             elif outcome == "gone":
                 self._schedule_resync(debounce=False)
+            yield_now()
 
         for pane_id in list(self.managed):
             mp = self.managed.get(pane_id)
             if mp is None:
+                yield_now()
                 continue
             if not self._eligible(pane_id):
                 if mp.kind in SEMANTIC_HOLD_KINDS:
                     self._release_hold(pane_id, "pane no longer eligible")
                 else:
                     self._clear_metadata(pane_id, "pane no longer eligible")
+                yield_now()
                 continue
             self._probe_pane(pane_id)
+            yield_now()
 
         for pane_id, rec in list(self._registry.items()):
             if pane_id in self.managed or not self._eligible(pane_id):
+                yield_now()
                 continue
             if rec.get("agent_status") in ("idle", "done"):
                 self._probe_pane(pane_id)
+            yield_now()
         self._publish()
 
     def _progress_sweep(self) -> None:
@@ -1097,6 +1108,19 @@ class Daemon:
         connected_at = None
         next_reprobe = next_progress = self._clock()
         next_resync = self._clock() + self._resync_interval
+
+        def _drain_probe_events() -> None:
+            """Keep the non-blocking status stream moving between probes."""
+            nonlocal backoff
+            stream = self._stream
+            if stream is None or stream.closed:
+                return
+            messages = stream.read_events(max_chunks=1)
+            if messages:
+                backoff = self._backoff_base
+            for message in messages:
+                self.dispatch_event(message)
+
         while True:
             try:
                 if self._stream is None:
@@ -1163,7 +1187,26 @@ class Daemon:
                                 stream.close()
                                 connected_at = None
                                 continue
-                        self._reprobe_sweep()
+                        self._reprobe_sweep(_drain_probe_events)
+                        if self._stream is not stream or stream.closed:
+                            unexpected_close = (
+                                self._stream is stream and stream.closed
+                            )
+                            try:
+                                selector.unregister(stream)
+                            except (KeyError, ValueError):
+                                pass
+                            registered = None
+                            stream.close()
+                            if self._stream is stream:
+                                self._stream = None
+                            if unexpected_close:
+                                sleep(backoff)
+                                backoff = min(
+                                    backoff * 2, self._backoff_max
+                                )
+                            connected_at = None
+                            continue
                         self._progress_sweep()
                         now = self._clock()
                         connected_at = now
@@ -1225,8 +1268,28 @@ class Daemon:
 
                 now = self._clock()
                 if now >= next_reprobe:
-                    self._reprobe_sweep()
-                    next_reprobe = now + self._reprobe
+                    stream = self._stream
+                    self._reprobe_sweep(_drain_probe_events)
+                    if self._stream is not stream or stream.closed:
+                        unexpected_close = (
+                            self._stream is stream and stream.closed
+                        )
+                        try:
+                            selector.unregister(stream)
+                        except (KeyError, ValueError):
+                            pass
+                        registered = None
+                        stream.close()
+                        if self._stream is stream:
+                            self._stream = None
+                        if unexpected_close:
+                            sleep(backoff)
+                            backoff = min(
+                                backoff * 2, self._backoff_max
+                            )
+                        connected_at = None
+                        continue
+                    next_reprobe = self._clock() + self._reprobe
                 if now >= next_progress:
                     self._progress_sweep()
                     next_progress = now + self._progress_interval

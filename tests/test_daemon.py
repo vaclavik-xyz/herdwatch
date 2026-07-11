@@ -317,6 +317,33 @@ def test_deny_skips_pane():
     assert d.managed == {}
 
 
+def test_reprobe_sweep_yields_before_and_between_panes():
+    client = FakeClient(
+        [_agent(pane="w1:p1", status="idle"), _agent(pane="w1:p2", status="idle")]
+    )
+    order = []
+
+    class Probe:
+        name = "ordered"
+
+        def check(self, ctx):
+            order.append(f"probe:{ctx.pane_id}")
+            return None
+
+    d = make_daemon(client, [Probe()], reprobe_interval_s=0)
+    seed(d, client)
+
+    d._reprobe_sweep(lambda: order.append("yield"))
+
+    assert order == [
+        "yield",
+        "probe:w1:p1",
+        "yield",
+        "probe:w1:p2",
+        "yield",
+    ]
+
+
 def test_allow_only_listed():
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(
@@ -1980,6 +2007,58 @@ def test_run_loop_processes_idle_event_from_stream():
     except Stop:
         pass
     assert ("w1:p1", "working", "⏳ review") in client.reports
+
+
+def test_run_drains_status_event_between_reprobe_panes():
+    order = []
+    stream = FakeStream()
+
+    class StopClient(FakeClient):
+        def report_agent(
+            self, pane_id, source, agent, state, custom_status=None
+        ):
+            super().report_agent(
+                pane_id, source, agent, state, custom_status
+            )
+            raise Stop()
+
+    client = StopClient(
+        [
+            _agent(pane="w1:p1", status="idle"),
+            _agent(pane="w1:p2", status="working"),
+            _agent(pane="w1:p3", status="idle"),
+        ]
+    )
+
+    class Probe:
+        name = "interleaved"
+
+        def check(self, ctx):
+            order.append(ctx.pane_id)
+            if ctx.pane_id == "w1:p1":
+                client.agents["w1:p2"]["agent_status"] = "idle"
+                stream.feed(_status_event(pane="w1:p2", status="idle"))
+                return None
+            if ctx.pane_id == "w1:p2":
+                return Pending("marker", 40, "marker")
+            return None
+
+    d = make_daemon(
+        client,
+        [Probe()],
+        stream_factory=lambda subs: stream,
+        reprobe_interval_s=999.0,
+        resync_interval_s=999.0,
+        progress_interval_s=999.0,
+    )
+
+    try:
+        d.run(sleep=_stop_sleep)
+    except Stop:
+        pass
+
+    assert client.reports == [("w1:p2", "working", "⏳ marker")]
+    assert "w1:p3" not in order
 
 
 def test_run_drains_startup_replay_before_running_slow_probes():
