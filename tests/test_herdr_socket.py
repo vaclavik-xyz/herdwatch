@@ -154,10 +154,23 @@ def test_request_raises_unavailable_on_oversized_response(tmp_path):
         srv.close()
 
 
-def test_request_raises_unavailable_with_zero_timeout(server):
-    # Ensure socket is closed even with zero timeout
-    with pytest.raises(HerdrUnavailable):
-        request("ping", {}, socket_path=server.path, timeout_s=0.0)
+def test_request_closes_socket_even_on_connect_failure():
+    # Verify socket is properly closed even when connect fails immediately
+    from unittest.mock import patch, MagicMock
+
+    with patch('herdwatch.herdr_socket.socket.socket') as mock_socket_class:
+        # Create a real MagicMock that will act like a context manager
+        mock_sock = MagicMock()
+        mock_socket_class.return_value = mock_sock
+        mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock.__exit__ = MagicMock(return_value=False)
+        mock_sock.connect.side_effect = OSError("Connection refused")
+
+        with pytest.raises(HerdrUnavailable):
+            request("ping", {}, socket_path="/nonexistent", timeout_s=10.0)
+
+        # Verify the socket's __exit__ (close) was called
+        mock_sock.__exit__.assert_called_once()
 
 
 def test_request_raises_unavailable_on_slow_drip(tmp_path):
