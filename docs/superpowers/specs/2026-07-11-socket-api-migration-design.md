@@ -167,9 +167,12 @@ Main loop (single thread):
    registry built from a pre-subscribe snapshot could go stale for up to a
    full resync. If B's pane set differs from A's, resubscribe with B and
    repeat. Adopt from the state file (same pid-liveness rule as today):
-   `"hold"` rows re-adopt as now; **non-`"hold"` rows go into a
-   legacy-release set retried each reprobe sweep until `release_agent`
-   confirms (success or `not_found`)** — they may come from a
+   `"hold"` rows re-adopt as now; rows flagged `"meta": true` (written by
+   this daemon generation for `progress`/`done` kinds) are **skipped** —
+   their metadata self-expires via TTL; **remaining non-`"hold"` rows
+   (pre-migration, no `meta` flag) go into a legacy-release set retried
+   each reprobe sweep until `release_agent` confirms (success or
+   `not_found`)** — they may come from a
    pre-migration daemon whose progress labels were semantic
    `report_agent` assertions with no TTL to clean them, so dropping them
    on a single failed attempt (herdr briefly down) would orphan the
@@ -187,11 +190,25 @@ Main loop (single thread):
    moved between the old daemon's crash and the new daemon's first
    snapshot), attempt a **label-match salvage** before dropping: if
    exactly one snapshot record has the same `agent` and a `custom_status`
-   equal to the row's stored label, remap the entry to that pane. This is
-   safe: `release_agent(source="herdwatch")` on a pane our source never
-   asserted is a no-op, so a coincidental match cannot break anything —
-   the worst case equals dropping the row. No match / multiple matches →
-   drop. Finish with one full sweep.
+   equal to the row's stored label — and that pane is not already in
+   `managed` or the legacy set — remap the entry to that pane. Safety:
+   a mismatched target either carries no herdwatch assertion (release
+   from our source is a no-op) or carries a herdwatch *orphan* (releasing
+   it is also correct cleanup); a healthy tracked assertion can never be
+   hit because tracked panes are excluded from candidates. No match /
+   multiple matches → drop.
+
+   **Accepted residual risk (documented, not engineered around):** two or
+   more legacy rows with identical agent+label whose panes were all moved
+   during the old daemon's downtime produce ambiguous matches and are
+   dropped, leaving no-TTL assertions stuck under their new ids. herdr
+   exposes no assertion-ownership lookup, so no client-side scheme can
+   resolve this conclusively; retaining the rows would spin forever
+   against ids that answer `not_found`. It needs a triple coincidence on
+   a one-time migration path, is visually obvious (a pane stuck
+   `working <label>`), and has a manual remedy:
+   `herdr pane release-agent <pane> --source herdwatch --agent <agent>`
+   (or a herdr server restart). Finish with one full sweep.
 2. **Wait:** `selectors` on the stream fd, timeout = time to the nearest
    deadline (per-pane reprobe, resync).
 3. **`agent_status_changed` event:** update registry; run the same per-pane
