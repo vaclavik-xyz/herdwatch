@@ -141,13 +141,22 @@ class EventStream:
             raise HerdrUnavailable(str(exc)) from exc
         line, self._buf = self._buf.split(b"\n", 1)
         try:
-            _parse_response(line)  # raises HerdrApiError on error ack
+            msg = json.loads(line)
+            if not isinstance(msg, dict):
+                raise HerdrUnavailable("subscribe ack must be a JSON object")
+            err = msg.get("error")
+            if err:
+                if not isinstance(err, dict):
+                    raise HerdrUnavailable("subscribe ack error field must be an object")
+                raise HerdrApiError(err.get("code", "unknown"), err.get("message", ""))
         except HerdrApiError:
             self.close()
             raise
-        except ValueError:
+        except (ValueError, HerdrUnavailable, AttributeError, TypeError) as exc:
             self.close()
-            raise HerdrUnavailable("invalid subscribe ack JSON") from None
+            if isinstance(exc, HerdrUnavailable):
+                raise
+            raise HerdrUnavailable("invalid subscribe ack") from None
         self._sock.setblocking(False)
 
     def fileno(self) -> int:

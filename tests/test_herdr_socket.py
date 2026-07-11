@@ -347,6 +347,7 @@ def test_event_stream_raises_unavailable_on_invalid_ack_json(sock_dir):
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(1)
+    closed_event = threading.Event()
 
     def send_invalid_ack():
         conn, _ = srv.accept()
@@ -360,13 +361,52 @@ def test_event_stream_raises_unavailable_on_invalid_ack_json(sock_dir):
         # Send invalid JSON as ACK
         try:
             conn.sendall(b"not valid json\n")
+            # Wait for client to close or timeout
+            try:
+                _ = conn.recv(1)  # Blocks until client closes or sends data
+            except OSError:
+                pass
+            closed_event.set()
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=send_invalid_ack, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(HerdrUnavailable):
+            EventStream([{"type": "pane.created"}], socket_path=path, ack_timeout_s=5.0)
+        # Verify the server detected client closure within a reasonable time
+        assert closed_event.wait(timeout=2.0), "Client did not close socket"
+    finally:
+        srv.close()
+
+
+def test_event_stream_raises_unavailable_on_structurally_invalid_ack(sock_dir):
+    """Regression: structurally invalid ACK (e.g., array or malformed object)."""
+    path = str(sock_dir / "struct_invalid_ack.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def send_invalid_structure():
+        conn, _ = srv.accept()
+        # Read and discard subscription request
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+        # Send valid JSON but structurally invalid ACK (array instead of object)
+        try:
+            conn.sendall(b"[]\n")
             time.sleep(10)
         except OSError:
             pass
         finally:
             conn.close()
 
-    t = threading.Thread(target=send_invalid_ack, daemon=True)
+    t = threading.Thread(target=send_invalid_structure, daemon=True)
     t.start()
     try:
         with pytest.raises(HerdrUnavailable):
