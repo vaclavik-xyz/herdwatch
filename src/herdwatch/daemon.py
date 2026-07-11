@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import selectors
 import signal
 import time
 from dataclasses import dataclass
@@ -189,6 +190,95 @@ class Daemon:
                 self._adopted.add(pane_id)
             elif not row.get("meta"):
                 self._legacy_release[pane_id] = mp
+
+    # ---------- bootstrap ----------
+
+    def _subscriptions_for(self, pane_ids: list[str]) -> list[dict]:
+        subscriptions = [dict(subscription) for subscription in GLOBAL_SUBSCRIPTIONS]
+        subscriptions += [
+            {"type": "pane.agent_status_changed", "pane_id": pane_id}
+            for pane_id in sorted(pane_ids)
+        ]
+        return subscriptions
+
+    def bootstrap(self) -> bool:
+        """Subscribe between two snapshots and seed the registry from truth."""
+        if self._stream_factory is None:
+            return False
+        for _ in range(5):
+            try:
+                snapshot = self._client.session_snapshot()
+            except HerdrApiError as exc:
+                self._log_boot_failure(
+                    "herdwatch requires herdr >= 0.7.2 with "
+                    f"session.snapshot (server said: {exc})",
+                    error=True,
+                )
+                return False
+            except HerdrUnavailable as exc:
+                self._log_boot_failure(f"herdr unreachable: {exc}")
+                return False
+            pane_ids = [
+                agent["pane_id"]
+                for agent in snapshot.get("agents", [])
+                if agent.get("pane_id")
+            ]
+            try:
+                stream = self._stream_factory(self._subscriptions_for(pane_ids))
+            except HerdrApiError as exc:
+                log.info(
+                    "subscribe rejected (%s); retrying with a fresh snapshot",
+                    exc,
+                )
+                continue
+            except HerdrUnavailable as exc:
+                self._log_boot_failure(f"subscribe failed: {exc}")
+                return False
+            try:
+                snapshot = self._client.session_snapshot()
+            except (HerdrApiError, HerdrUnavailable) as exc:
+                log.warning("bootstrap: post-subscribe snapshot failed: %s", exc)
+                stream.close()
+                return False
+            records = {
+                agent["pane_id"]: agent
+                for agent in snapshot.get("agents", [])
+                if agent.get("pane_id")
+            }
+            if set(records) != set(pane_ids):
+                stream.close()
+                continue
+            self._stream = stream
+            self._registry = records
+            for record in records.values():
+                self._remember_record(record)
+            by_terminal = {
+                record["terminal_id"]: pane_id
+                for pane_id, record in records.items()
+                if record.get("terminal_id")
+            }
+            self._backfill_legacy_terminals(records)
+            self._reconcile_books(records, by_terminal)
+            for mapping in (
+                self._last_probe,
+                self._session_cache,
+                self._meta_asserted_at,
+            ):
+                for pane_id in list(mapping):
+                    if pane_id not in records:
+                        mapping.pop(pane_id, None)
+            self._last_boot_error = None
+            log.info("connected to herdr (%d panes)", len(records))
+            return True
+        self._log_boot_failure("pane set kept drifting; will retry")
+        return False
+
+    def _log_boot_failure(self, reason: str, *, error: bool = False) -> None:
+        """Log each distinct bootstrap failure once across retry attempts."""
+        if reason == self._last_boot_error:
+            return
+        self._last_boot_error = reason
+        (log.error if error else log.warning)("bootstrap: %s", reason)
 
     # ---------- event dispatch ----------
 
@@ -702,8 +792,90 @@ class Daemon:
                 )
         self._publish()
 
-    def run(self):
-        raise NotImplementedError("rebuilt in the run-loop task")
+    def run(self, sleep: Callable[[float], None] = time.sleep) -> None:
+        atexit.register(self.shutdown)
+
+        def _handle_term(signum, frame):
+            self.shutdown()
+            raise SystemExit(0)
+
+        try:
+            signal.signal(signal.SIGTERM, _handle_term)
+        except (ValueError, OSError):
+            pass
+
+        selector = selectors.DefaultSelector()
+        backoff = self._backoff_base
+        registered = None
+        next_reprobe = next_progress = self._clock()
+        next_resync = self._clock() + self._resync_interval
+        while True:
+            try:
+                if self._stream is None:
+                    if registered is not None:
+                        try:
+                            selector.unregister(registered)
+                        except (KeyError, ValueError):
+                            pass
+                        registered = None
+                    if self.bootstrap():
+                        backoff = self._backoff_base
+                        selector.register(self._stream, selectors.EVENT_READ)
+                        registered = self._stream
+                        self._last_probe.clear()
+                        self._resync_due = False
+                        self._reprobe_sweep()
+                        self._progress_sweep()
+                        now = self._clock()
+                        next_reprobe = now + self._reprobe
+                        next_progress = now + self._progress_interval
+                        next_resync = now + self._resync_interval
+                    else:
+                        sleep(backoff)
+                        backoff = min(backoff * 2, self._backoff_max)
+                    continue
+
+                now = self._clock()
+                timeout = max(
+                    0.0,
+                    min(next_reprobe, next_progress, next_resync) - now,
+                )
+                ready = selector.select(timeout)
+                if ready:
+                    stream = self._stream
+                    for message in stream.read_events():
+                        self.dispatch_event(message)
+                    if self._stream is not stream or stream.closed:
+                        try:
+                            selector.unregister(stream)
+                        except (KeyError, ValueError):
+                            pass
+                        registered = None
+                        stream.close()
+                        if self._stream is stream:
+                            self._stream = None
+                        continue
+
+                if self._resync_due:
+                    self._resync()
+                    if self._stream is None:
+                        continue
+
+                now = self._clock()
+                if now >= next_reprobe:
+                    self._reprobe_sweep()
+                    next_reprobe = now + self._reprobe
+                if now >= next_progress:
+                    self._progress_sweep()
+                    next_progress = now + self._progress_interval
+                if now >= next_resync:
+                    self._resync()
+                    next_resync = now + self._resync_interval
+            except SystemExit:
+                raise
+            except Exception:
+                log.exception("daemon loop iteration failed; continuing")
+                sleep(1.0)
 
 
 def build_daemon(config: Config, client=None) -> Daemon:

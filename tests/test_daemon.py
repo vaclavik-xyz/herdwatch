@@ -1,4 +1,6 @@
 # tests/test_daemon.py
+import socket as _socket
+
 from herdwatch.daemon import Daemon, ManagedPane, SOURCE, TTL_MAX_MS, TTL_MIN_MS
 from herdwatch.gitctx import GitInfo
 from herdwatch.herdr_socket import HerdrApiError, HerdrUnavailable
@@ -832,15 +834,40 @@ def _status_event(pane="w1:p1", status="idle", custom=None, agent="claude"):
 
 
 class FakeStream:
-    """Minimal stand-in for herdr_socket.EventStream bookkeeping (Task 8
-    replaces it with a socketpair-backed version; the interface is a
-    superset of this one)."""
+    """Test double backed by a real socketpair so selectors can poll it."""
 
-    def __init__(self):
+    def __init__(self, subscriptions=None):
+        self.subscriptions = subscriptions or []
         self.closed = False
+        self._r, self._w = _socket.socketpair()
+        self._r.setblocking(False)
+        self._pending = []
+
+    def feed(self, event):
+        self._pending.append(event)
+        self._w.send(b"x")
+
+    def fileno(self):
+        return self._r.fileno()
+
+    def read_events(self):
+        try:
+            while True:
+                if not self._r.recv(4096):
+                    self.closed = True
+                    break
+        except BlockingIOError:
+            pass
+        out, self._pending = self._pending, []
+        return out
 
     def close(self):
         self.closed = True
+        for sock in (self._r, self._w):
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def test_idle_edge_event_probes_immediately():
@@ -1263,3 +1290,364 @@ def test_resync_drops_stale_session_cache():
     client.set_agents([])
     d._resync()
     assert "w1:p1" not in d._session_cache
+
+
+def test_bootstrap_subscribes_then_snapshots():
+    client = FakeClient([_agent(status="idle")])
+    made = []
+
+    def factory(subs):
+        made.append(subs)
+        return FakeStream(subs)
+
+    d = make_daemon(client, stream_factory=factory)
+    assert d.bootstrap() is True
+    assert d._stream is not None
+    assert "w1:p1" in d._registry
+    per_pane = [
+        sub
+        for sub in made[0]
+        if sub.get("type") == "pane.agent_status_changed"
+    ]
+    assert per_pane == [
+        {"type": "pane.agent_status_changed", "pane_id": "w1:p1"}
+    ]
+    globals_ = {sub["type"] for sub in made[0] if "pane_id" not in sub}
+    assert {
+        "pane.created",
+        "pane.closed",
+        "pane.exited",
+        "pane.agent_detected",
+        "pane.moved",
+        "workspace.closed",
+        "tab.closed",
+    } <= globals_
+
+
+def test_bootstrap_retries_when_pane_set_drifts():
+    client = FakeClient([])
+    calls = {"n": 0}
+    made = []
+
+    def drifting_snapshot():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"agents": [_agent()]}
+        return {"agents": [_agent(), _agent(pane="w2:p1")]}
+
+    client.session_snapshot = drifting_snapshot
+
+    def factory(subs):
+        made.append(subs)
+        return FakeStream(subs)
+
+    d = make_daemon(client, stream_factory=factory)
+    assert d.bootstrap() is True
+    assert set(d._registry) == {"w1:p1", "w2:p1"}
+    per_pane = [sub["pane_id"] for sub in made[-1] if "pane_id" in sub]
+    assert per_pane == ["w1:p1", "w2:p1"]
+
+
+def test_bootstrap_fails_when_unavailable():
+    client = FakeClient([])
+    client.snapshot_error = HerdrUnavailable("down")
+    d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
+    assert d.bootstrap() is False
+
+
+def test_bootstrap_old_server_logs_and_fails(caplog):
+    client = FakeClient([])
+    client.snapshot_error = HerdrApiError("unknown_method", "session.snapshot")
+    d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
+    with caplog.at_level("ERROR"):
+        assert d.bootstrap() is False
+    assert any("0.7.2" in record.message for record in caplog.records)
+
+
+def test_bootstrap_reconciles_adopted_rows_before_first_sweep():
+    client = FakeClient(
+        [_agent(pane="w2:p9", status="idle", term="t-old")]
+    )
+    d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+                "terminal_id": "t-old",
+            }
+        ]
+    )
+    assert d.bootstrap() is True
+    assert "w2:p9" in d.managed and "w1:p1" not in d.managed
+    assert client.releases == []
+
+
+def test_bootstrap_logs_each_failure_reason_once(caplog):
+    client = FakeClient([])
+    client.snapshot_error = HerdrUnavailable("down")
+    d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
+    with caplog.at_level("WARNING"):
+        assert d.bootstrap() is False
+        assert d.bootstrap() is False
+    assert sum("down" in record.message for record in caplog.records) == 1
+
+
+def test_bootstrap_subscribe_rejection_retries_with_fresh_set():
+    client = FakeClient([_agent(status="idle")])
+    attempts = {"n": 0}
+
+    def factory(subs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise HerdrApiError("not_found", "pane closed during setup")
+        return FakeStream(subs)
+
+    d = make_daemon(client, stream_factory=factory)
+    assert d.bootstrap() is True
+    assert attempts["n"] == 2
+
+
+def test_bootstrap_closes_stream_when_second_snapshot_fails():
+    client = FakeClient([])
+    calls = {"n": 0}
+    stream = FakeStream()
+
+    def snapshot():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"agents": [_agent()]}
+        raise HerdrUnavailable("restart during bootstrap")
+
+    client.session_snapshot = snapshot
+    d = make_daemon(client, stream_factory=lambda subs: stream)
+
+    assert d.bootstrap() is False
+    assert stream.closed is True
+
+
+class Stop(Exception):
+    pass
+
+
+def _stop_sleep(_):
+    raise Stop()
+
+
+def test_run_loop_processes_idle_event_from_stream():
+    client = FakeClient([_agent(status="working")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    stream = FakeStream()
+    d = make_daemon(
+        client,
+        [probe],
+        stream_factory=lambda subs: stream,
+        reprobe_interval_s=0.001,
+        resync_interval_s=999.0,
+        progress_interval_s=999.0,
+    )
+    ticks = {"n": 0}
+
+    def clock():
+        ticks["n"] += 1
+        if ticks["n"] == 50:
+            client.agents["w1:p1"]["agent_status"] = "idle"
+            stream.feed(_status_event(status="idle"))
+        if ticks["n"] > 400:
+            raise Stop()
+        return float(ticks["n"]) * 0.001
+
+    d._clock = clock
+    try:
+        d.run(sleep=_stop_sleep)
+    except Stop:
+        pass
+    assert ("w1:p1", "working", "⏳ review") in client.reports
+
+
+def test_run_rebootstraps_after_stream_close():
+    client = FakeClient([_agent(status="idle")])
+    streams = []
+
+    def factory(subs):
+        stream = FakeStream(subs)
+        streams.append(stream)
+        return stream
+
+    d = make_daemon(
+        client,
+        [StaticProbe(None)],
+        stream_factory=factory,
+        reprobe_interval_s=0.001,
+        resync_interval_s=0.001,
+        progress_interval_s=0.001,
+    )
+    ticks = {"n": 0}
+
+    def clock():
+        ticks["n"] += 1
+        if ticks["n"] == 20 and streams:
+            streams[0].feed({"event": "noop", "data": {}})
+            streams[0]._w.close()
+        if ticks["n"] > 400:
+            raise Stop()
+        return float(ticks["n"]) * 0.001
+
+    d._clock = clock
+    try:
+        d.run(sleep=_stop_sleep)
+    except Stop:
+        pass
+    assert len(streams) >= 2
+
+
+def test_run_rebootstraps_after_moved_event_closes_registered_stream():
+    client = FakeClient([_agent(status="working")])
+    streams = []
+
+    def factory(subs):
+        stream = FakeStream(subs)
+        streams.append(stream)
+        return stream
+
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        stream_factory=factory,
+        reprobe_interval_s=0.001,
+        resync_interval_s=999.0,
+        progress_interval_s=999.0,
+    )
+    ticks = {"n": 0}
+
+    def clock():
+        ticks["n"] += 1
+        if ticks["n"] == 20 and streams:
+            moved = _agent(pane="w2:p9", status="idle", term="term-w1:p1")
+            client.set_agents([moved])
+            streams[0].feed(
+                {
+                    "event": "pane.moved",
+                    "data": {
+                        "previous_pane_id": "w1:p1",
+                        "pane": dict(moved),
+                    },
+                }
+            )
+        if ticks["n"] > 400:
+            raise Stop()
+        return float(ticks["n"]) * 0.001
+
+    d._clock = clock
+    try:
+        d.run(sleep=_stop_sleep)
+    except Stop:
+        pass
+    assert ("w2:p9", "working", "⏳ review") in client.reports
+
+
+def test_run_caps_exponential_backoff_while_bootstrap_fails():
+    client = FakeClient([])
+    client.snapshot_error = HerdrUnavailable("down")
+    delays = []
+
+    def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 5:
+            raise SystemExit(0)
+
+    d = make_daemon(
+        client,
+        stream_factory=lambda subs: FakeStream(subs),
+        backoff_base_s=0.25,
+        backoff_max_s=1.0,
+    )
+    try:
+        d.run(sleep=sleep)
+    except SystemExit:
+        pass
+
+    assert delays == [0.25, 0.5, 1.0, 1.0, 1.0]
+
+
+def test_run_resets_backoff_after_successful_reconnect():
+    client = FakeClient([])
+    snapshot_calls = {"n": 0}
+    streams = []
+
+    def snapshot():
+        snapshot_calls["n"] += 1
+        if snapshot_calls["n"] in (1, 4):
+            raise HerdrUnavailable("down")
+        return {"agents": [_agent()]}
+
+    def factory(subs):
+        stream = FakeStream(subs)
+        streams.append(stream)
+        return stream
+
+    client.session_snapshot = snapshot
+    delays = []
+
+    def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 2:
+            raise SystemExit(0)
+
+    closed = {"done": False}
+
+    def clock():
+        if streams and not closed["done"]:
+            closed["done"] = True
+            streams[0].feed({"event": "noop", "data": {}})
+            streams[0]._w.close()
+        return 0.0
+
+    d = make_daemon(
+        client,
+        [StaticProbe(None)],
+        stream_factory=factory,
+        clock=clock,
+        backoff_base_s=0.25,
+        backoff_max_s=1.0,
+    )
+    try:
+        d.run(sleep=sleep)
+    except SystemExit:
+        pass
+
+    assert delays == [0.25, 0.25]
+
+
+def test_run_registers_shutdown_and_sigterm_cleans_owned_hold(monkeypatch):
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    registered = []
+    handlers = {}
+    monkeypatch.setattr("herdwatch.daemon.atexit.register", registered.append)
+    monkeypatch.setattr(
+        "herdwatch.daemon.signal.signal",
+        lambda signum, handler: handlers.setdefault(signum, handler),
+    )
+
+    try:
+        d.run(sleep=lambda delay: (_ for _ in ()).throw(SystemExit(0)))
+    except SystemExit:
+        pass
+
+    assert registered == [d.shutdown]
+    handler = next(iter(handlers.values()))
+    try:
+        handler(None, None)
+    except SystemExit:
+        pass
+    assert client.releases == ["w1:p1"]
+    assert d.managed == {}
