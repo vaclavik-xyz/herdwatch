@@ -95,3 +95,83 @@ def request(method: str, params: dict, *, socket_path: str | None = None,
                 raise HerdrUnavailable(f"response line exceeds {_MAX_RESPONSE_SIZE} bytes")
 
     return _parse_response(buf.split(b"\n", 1)[0])
+
+
+class EventStream:
+    """Persistent `events.subscribe` connection.
+
+    The subscription set is fixed at construction (herdr semantics); to
+    change it, close this stream and open a new one. `read_events()` never
+    blocks; EOF/errors set `closed` instead of raising so the caller's
+    loop can tear down and reconnect.
+    """
+
+    def __init__(self, subscriptions: list[dict], *, socket_path: str | None = None,
+                 ack_timeout_s: float = 10.0) -> None:
+        path = socket_path or resolve_socket_path()
+        self.closed = False
+        self._buf = b""
+        try:
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.settimeout(ack_timeout_s)
+            self._sock.connect(path)
+            payload = json.dumps({"id": "herdwatch-sub", "method": "events.subscribe",
+                                  "params": {"subscriptions": subscriptions}})
+            self._sock.sendall(payload.encode() + b"\n")
+            while b"\n" not in self._buf:
+                chunk = self._sock.recv(_RECV_CHUNK)
+                if not chunk:
+                    raise HerdrUnavailable("connection closed before subscribe ack")
+                self._buf += chunk
+        except HerdrUnavailable:
+            self.close()
+            raise
+        except OSError as exc:
+            self.close()
+            raise HerdrUnavailable(str(exc)) from exc
+        line, self._buf = self._buf.split(b"\n", 1)
+        try:
+            _parse_response(line)  # raises HerdrApiError on error ack
+        except HerdrApiError:
+            self.close()
+            raise
+        self._sock.setblocking(False)
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+    def read_events(self) -> list[dict]:
+        """Drain complete event lines without blocking. On EOF or a socket
+        error, parse what remains and set `closed`."""
+        if not self.closed:
+            while True:
+                try:
+                    chunk = self._sock.recv(_RECV_CHUNK)
+                except (BlockingIOError, InterruptedError):
+                    break
+                except OSError:
+                    self.closed = True
+                    break
+                if not chunk:
+                    self.closed = True
+                    break
+                self._buf += chunk
+        events: list[dict] = []
+        while b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                pass  # skip malformed line, keep the stream alive
+        return events
+
+    def close(self) -> None:
+        self.closed = True
+        sock = getattr(self, "_sock", None)
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
