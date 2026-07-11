@@ -543,6 +543,12 @@ class Daemon:
             if not self._clear_metadata(pane_id, "agent stopped"):
                 return
             self._last_probe.pop(pane_id, None)
+            mp = None
+        if mp is not None and mp.kind == "done" and status != "done":
+            if not self._clear_metadata(pane_id, f"left done ({status})"):
+                return
+            self._last_probe.pop(pane_id, None)
+            mp = None
         if status in ("idle", "done"):
             if prev != status:
                 self._last_probe.pop(pane_id, None)  # fresh edge: probe now

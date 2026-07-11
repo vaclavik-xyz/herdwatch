@@ -1763,6 +1763,24 @@ def test_done_edge_event_labels_immediately():
     assert client.metadata == [("w1:p1", "⏳ review", False, 30000)]
 
 
+def test_working_edge_clears_done_metadata_without_new_hold():
+    client = FakeClient([_agent(status="done")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.agents["w1:p1"]["agent_status"] = "working"
+
+    d.dispatch_event(_status_event(status="working"))
+
+    assert client.metadata[-1] == ("w1:p1", None, True, None)
+    assert client.reports == []
+    assert "w1:p1" not in d.managed
+
+
 def test_self_echo_event_is_ignored():
     client = FakeClient([_agent(status="idle")])
     probe = StaticProbe(Pending("review", 30, "roborev"))
