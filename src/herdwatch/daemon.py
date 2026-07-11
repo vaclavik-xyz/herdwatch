@@ -340,13 +340,18 @@ class Daemon:
             if now >= stop_at:
                 return "timeout", drained
             if now >= quiet_until and not stream.has_buffered_data:
-                return "quiet", drained
-            deadline = (
-                stop_at
-                if now >= quiet_until
-                else min(quiet_until, stop_at)
-            )
-            ready = selector.select(max(0.0, deadline - now))
+                # Close the race where data becomes readable exactly as the
+                # preceding timed select returns with no events.
+                ready = selector.select(0.0)
+                if not ready:
+                    return "quiet", drained
+            else:
+                deadline = (
+                    stop_at
+                    if now >= quiet_until
+                    else min(quiet_until, stop_at)
+                )
+                ready = selector.select(max(0.0, deadline - now))
             if not ready:
                 continue
             messages = stream.read_events(max_chunks=1)
@@ -386,11 +391,7 @@ class Daemon:
         if rec is None:
             self._schedule_resync(debounce=False)  # unknown pane: topology drifted
             return
-        status = data.get("agent_status") or "unknown"
-        prev = rec.get("agent_status")
-        rec["agent_status"] = status
-        if data.get("agent"):
-            rec["agent"] = data["agent"]
+        event_status = data.get("agent_status") or "unknown"
         mp = self.managed.get(pane_id)
         if mp is not None:
             expected = {
@@ -398,7 +399,7 @@ class Daemon:
                 "idle-meta": "idle",
             }.get(mp.kind, "working")
             if (
-                status == expected
+                event_status == expected
                 and (data.get("custom_status") or "") == mp.custom_status
                 and (
                     mp.kind != "hold-pending"
@@ -409,7 +410,23 @@ class Daemon:
                     mp.kind = "hold"
                     self._adopted.discard(pane_id)
                     log.info("verified pending hold %s from event", pane_id)
+                rec["agent_status"] = event_status
+                if data.get("agent"):
+                    rec["agent"] = data["agent"]
                 return  # ack of our own report/metadata write
+
+        # Herdr 0.7.3 replays retained subscription events. Snapshot/readback
+        # is truth: a stale working event must not suppress a hold for a pane
+        # that is currently idle (and a stale idle event must not claim one
+        # that is currently working).
+        prev = rec.get("agent_status")
+        observed = self._client.agent_get(pane_id)
+        if observed is None:
+            self._schedule_resync(debounce=False)
+            return
+        self._registry[pane_id] = observed
+        self._remember_record(observed)
+        status = observed.get("agent_status") or "unknown"
         if mp is not None and mp.kind == "idle-meta" and status != "idle":
             if not self._clear_metadata(pane_id, f"left idle ({status})"):
                 return
@@ -1075,13 +1092,7 @@ class Daemon:
                         catchup_outcome, drained = self._drain_startup_replay(
                             selector, stream
                         )
-                        if catchup_outcome in ("closed", "timeout"):
-                            if catchup_outcome == "timeout":
-                                log.warning(
-                                    "startup replay did not become quiet after "
-                                    "%.1fs; reconnecting",
-                                    self._startup_replay_max,
-                                )
+                        if catchup_outcome == "closed":
                             try:
                                 selector.unregister(stream)
                             except (KeyError, ValueError):
@@ -1093,11 +1104,17 @@ class Daemon:
                             sleep(backoff)
                             backoff = min(backoff * 2, self._backoff_max)
                             continue
+                        if catchup_outcome == "timeout":
+                            log.warning(
+                                "startup replay did not become quiet after "
+                                "%.1fs; continuing with replay-safe handlers",
+                                self._startup_replay_max,
+                            )
                         if drained:
                             log.info(
                                 "drained %d retained startup events", drained
                             )
-                        if catchup_outcome == "quiet":
+                        if catchup_outcome in ("quiet", "timeout"):
                             if not self._resync():
                                 try:
                                     selector.unregister(stream)

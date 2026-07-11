@@ -1119,6 +1119,21 @@ def test_idle_edge_event_probes_immediately():
     assert client.reports == [("w1:p1", "working", "⏳ review")]
 
 
+def test_stale_working_event_reprobes_current_idle_state():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+
+    d.dispatch_event(_status_event(status="working"))
+
+    assert d._registry["w1:p1"]["agent_status"] == "idle"
+    assert client.reports == [("w1:p1", "working", "⏳ review")]
+
+
 def test_done_edge_event_labels_immediately():
     client = FakeClient([_agent(status="working")])
     probe = StaticProbe(Pending("review", 30, "roborev"))
@@ -1930,7 +1945,7 @@ def test_run_drains_startup_replay_before_running_slow_probes():
     )
 
     try:
-        d.run(sleep=lambda delay: None)
+        d.run(sleep=_stop_sleep)
     except Stop:
         pass
 
@@ -2030,9 +2045,48 @@ def test_startup_replay_partial_buffer_cannot_be_declared_quiet():
     assert drained == 0
 
 
-def test_run_reconnects_without_probing_when_startup_replay_times_out():
-    client = FakeClient([_agent(status="working")])
+def test_startup_replay_drains_event_ready_at_quiet_boundary():
+    stream = DripStream()
+    stream.feed({"event": "boundary", "data": {}})
+    now = [0.0]
+    zero_polls = {"count": 0}
+
+    class BoundarySelector:
+        def select(self, timeout):
+            if timeout > 0:
+                now[0] += timeout
+                return []
+            zero_polls["count"] += 1
+            return [(stream, None)] if zero_polls["count"] == 1 else []
+
+    d = make_daemon(
+        FakeClient(),
+        clock=lambda: now[0],
+        startup_replay_quiet_s=1.0,
+        startup_replay_max_s=10.0,
+    )
+    try:
+        outcome, drained = d._drain_startup_replay(
+            BoundarySelector(), stream
+        )
+    finally:
+        stream.close()
+
+    assert outcome == "quiet"
+    assert drained == 1
+
+
+def test_run_takes_snapshot_without_reconnecting_when_startup_replay_times_out():
+    client = FakeClient([_agent(status="idle")])
     streams = []
+    observed_read_counts = []
+
+    class StopAfterProbe:
+        name = "stop-after-probe"
+
+        def check(self, ctx):
+            observed_read_counts.append(streams[0].read_count)
+            raise Stop()
 
     def factory(subs):
         stream = DripStream(subs)
@@ -2049,7 +2103,7 @@ def test_run_reconnects_without_probing_when_startup_replay_times_out():
 
     d = make_daemon(
         client,
-        [StaticProbe(Pending("review", 30, "roborev"))],
+        [StopAfterProbe()],
         stream_factory=factory,
         clock=clock,
         startup_replay_quiet_s=1.0,
@@ -2062,8 +2116,9 @@ def test_run_reconnects_without_probing_when_startup_replay_times_out():
         pass
 
     assert len(streams) == 1
-    assert streams[0].closed is True
+    assert streams[0].closed is False
     assert streams[0]._pending
+    assert observed_read_counts
     assert client.reports == []
 
 
