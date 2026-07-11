@@ -2299,7 +2299,10 @@ def test_run_new_marker_bypasses_recent_unmanaged_probe_throttle():
         name = "marker"
 
         def candidate_panes(self):
-            return {"w1:p1"} if candidate_active["value"] else set()
+            candidates = {"w1:p2", "w1:p3"}
+            if candidate_active["value"]:
+                candidates.add("w1:p1")
+            return candidates
 
         def check_pane(self, pane_id):
             if pane_id == "w1:p1" and candidate_active["value"]:
@@ -2322,6 +2325,7 @@ def test_run_new_marker_bypasses_recent_unmanaged_probe_throttle():
             _agent(pane="w1:p1", status="idle"),
             _agent(pane="w1:p2", status="idle"),
             _agent(pane="w1:p3", status="idle"),
+            _agent(pane="w1:p4", status="idle"),
         ]
     )
     d = make_daemon(

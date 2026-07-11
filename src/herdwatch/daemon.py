@@ -1229,23 +1229,22 @@ class Daemon:
                     candidate_set - known_fast_candidates
                 )
                 known_fast_candidates = candidate_set
-                candidates = sorted(
-                    candidate_set,
-                    key=lambda pane_id: (
-                        pane_id not in fresh_fast_candidates,
-                        pane_id,
-                    ),
-                )
-                for offset in range(len(candidates)):
-                    index = (
-                        fast_candidate_cursor + offset
-                    ) % len(candidates)
-                    pane_id = candidates[index]
+                fresh = sorted(fresh_fast_candidates)
+                regular = sorted(candidate_set - fresh_fast_candidates)
+                if regular:
+                    start = fast_candidate_cursor % len(regular)
+                    rotated_regular = regular[start:] + regular[:start]
+                else:
+                    rotated_regular = []
+                for pane_id in fresh + rotated_regular:
                     rec = self._registry.get(pane_id) or {}
                     if rec.get("agent_status") not in ("idle", "done"):
                         continue
-                    fast_candidate_cursor = (index + 1) % len(candidates)
                     force = pane_id in fresh_fast_candidates
+                    if not force and regular:
+                        fast_candidate_cursor = (
+                            regular.index(pane_id) + 1
+                        ) % len(regular)
                     fast_candidate_checked = self._probe_pane(
                         pane_id,
                         fast=True,
