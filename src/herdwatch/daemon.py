@@ -14,6 +14,7 @@ from .aggregate import aggregate
 from .cache import TTLCache
 from .config import Config
 from .herdr import HerdrClient
+from .herdr_socket import HerdrApiError, HerdrUnavailable
 from .markers import MarkerStore
 from .models import PaneContext
 from .probes.bgjobs import BgJobsProbe
@@ -285,6 +286,118 @@ class Daemon:
                 self._release_hold(new, "moved to ineligible pane")
             else:
                 self._clear_metadata(new, "moved to ineligible pane")
+        self._publish()
+
+    def _backfill_legacy_terminals(self, records: dict[str, dict]) -> None:
+        """Legacy rows predate terminal_id persistence; grab it from the
+        first snapshot that still shows the pane, so later moves remap."""
+        for pane_id, mp in self._legacy_release.items():
+            if not mp.terminal_id and pane_id in records:
+                mp.terminal_id = records[pane_id].get("terminal_id") or ""
+
+    def _reconcile_books(
+        self, records: dict[str, dict], by_terminal: dict[str, str]
+    ) -> None:
+        """Move reconciliation + vanish handling for managed and legacy rows
+        against snapshot truth. Shared by _resync and bootstrap (so adopted
+        rows are reconciled BEFORE the first sweep can release stale ids)."""
+        for book in (self.managed, self._legacy_release):
+            for pane_id in list(book):
+                if pane_id in records:
+                    continue
+                mp = book[pane_id]
+                new_id = (
+                    by_terminal.get(mp.terminal_id) if mp.terminal_id else None
+                )
+                if (
+                    new_id is None
+                    and not mp.terminal_id
+                    and book is self._legacy_release
+                ):
+                    # label-match salvage (legacy rows only): a move before
+                    # our first snapshot left no terminal_id; a unique
+                    # (agent, custom_status) match among untracked panes is
+                    # safe to adopt -- a mismatched target either has no
+                    # herdwatch assertion (release is a no-op) or carries a
+                    # herdwatch orphan (releasing it is also correct cleanup)
+                    matches = [
+                        pid
+                        for pid, a in records.items()
+                        if pid not in self.managed
+                        and pid not in self._legacy_release
+                        and (a.get("agent") or "") == mp.agent
+                        and (a.get("custom_status") or "") == mp.custom_status
+                    ]
+                    if len(matches) == 1:
+                        new_id = matches[0]
+                if (
+                    new_id
+                    and new_id not in self.managed
+                    and new_id not in self._legacy_release
+                ):
+                    self._remap(pane_id, new_id, records.get(new_id))
+                    continue
+                del book[pane_id]
+                if book is self.managed:
+                    self._adopted.discard(pane_id)
+                    # best-effort cleanup; the pane is gone, drop regardless
+                    if mp.kind == "hold":
+                        self._client.release_agent(pane_id, SOURCE, mp.agent)
+                    else:
+                        self._client.report_metadata(
+                            pane_id,
+                            SOURCE,
+                            agent=mp.agent,
+                            clear_custom_status=True,
+                        )
+                    log.info("dropped vanished pane %s (%s)", pane_id, mp.kind)
+
+    def _resync(self) -> None:
+        """Snapshot is truth: reconcile managed/legacy/registry against it.
+        Never raises; herdr being down keeps all state for a later retry."""
+        self._resync_due = False
+        try:
+            snap = self._client.session_snapshot()
+        except HerdrApiError as exc:
+            log.error(
+                "herdwatch requires herdr >= 0.7.2 with session.snapshot "
+                "(server said: %s)",
+                exc,
+            )
+            return
+        except HerdrUnavailable as exc:
+            log.warning("resync skipped, herdr unreachable: %s", exc)
+            return
+        records = {
+            a["pane_id"]: a
+            for a in snap.get("agents", [])
+            if a.get("pane_id")
+        }
+        # captured BEFORE reconciliation: _remap mutates the registry, and a
+        # post-remap comparison would miss the pane-id change entirely
+        before_ids = set(self._registry)
+        by_terminal = {
+            a["terminal_id"]: pid
+            for pid, a in records.items()
+            if a.get("terminal_id")
+        }
+        self._backfill_legacy_terminals(records)
+        self._reconcile_books(records, by_terminal)
+        pane_set_changed = set(records) != before_ids
+        self._registry = records
+        for rec in records.values():
+            self._remember_record(rec)
+        for mapping in (
+            self._last_probe,
+            self._session_cache,
+            self._meta_asserted_at,
+        ):
+            for pane_id in list(mapping):
+                if pane_id not in records:
+                    mapping.pop(pane_id, None)
+        if pane_set_changed and self._stream is not None:
+            self._stream.close()
+            self._stream = None  # run loop re-bootstraps with the new pane set
         self._publish()
 
     # ---------- assert / release primitives ----------

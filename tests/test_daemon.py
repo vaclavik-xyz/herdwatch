@@ -1,6 +1,7 @@
 # tests/test_daemon.py
 from herdwatch.daemon import Daemon, ManagedPane, SOURCE, TTL_MAX_MS, TTL_MIN_MS
 from herdwatch.gitctx import GitInfo
+from herdwatch.herdr_socket import HerdrApiError, HerdrUnavailable
 from herdwatch.models import Pending, WorktreeHead
 
 
@@ -1062,3 +1063,178 @@ def test_pane_moved_prefers_fresh_session_from_event():
 
     assert "w1:p1" not in d._session_cache
     assert d._session_cache["w2:p9"] == "fresh-session"
+
+
+def test_resync_releases_vanished_pane_and_drops_bookkeeping():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.set_agents([])
+    client._release_result = "gone"  # herdr can't release a gone pane
+    d._resync()
+    assert client.releases == ["w1:p1"]  # best-effort attempted
+    assert d.managed == {}  # dropped regardless of outcome
+    assert d._registry == {}
+
+
+def test_resync_remaps_moved_pane_by_terminal_id():
+    # the pane.moved event was missed; the snapshot still reconciles it
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.set_agents(
+        [_agent(pane="w2:p9", status="idle", term="term-w1:p1")]
+    )
+    d._resync()
+    assert d.managed.get("w2:p9") is not None
+    assert d.managed["w2:p9"].kind == "hold"
+    assert client.releases == []  # nothing dropped, nothing released
+
+
+def test_resync_keeps_state_when_herdr_down():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.snapshot_error = HerdrUnavailable("down")
+    d._resync()
+    assert "w1:p1" in d.managed  # a blip must not drop assertions
+    assert "w1:p1" in d._registry
+
+
+def test_resync_logs_old_server_and_keeps_state(caplog):
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.snapshot_error = HerdrApiError(
+        "unknown_method", "session.snapshot"
+    )
+    with caplog.at_level("ERROR"):
+        d._resync()
+    assert any("0.7.2" in r.message for r in caplog.records)
+    assert "w1:p1" in d.managed
+
+
+def test_resync_tears_down_stream_on_pane_set_change():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(client)
+    seed(d, client)
+    d._stream = FakeStream()
+    client.set_agents([_agent(), _agent(pane="w2:p1")])
+    d._resync()
+    assert d._stream is None  # run loop re-bootstraps/resubscribes
+
+
+def test_resync_keeps_stream_when_pane_set_unchanged():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(client)
+    seed(d, client)
+    stream = FakeStream()
+    d._stream = stream
+    d._resync()
+    assert d._stream is stream
+
+
+def test_resync_backfills_legacy_terminal_id():
+    client = FakeClient([_agent(status="idle")], release_ok=False)
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+            }
+        ]
+    )  # pre-migration row: no terminal_id
+    d._resync()
+    assert d._legacy_release["w1:p1"].terminal_id == "term-w1:p1"
+
+
+def test_resync_remaps_legacy_row_by_terminal_id():
+    client = FakeClient([_agent(status="idle")], release_ok=False)
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
+    client.set_agents(
+        [_agent(pane="w2:p9", status="idle", term="term-w1:p1")]
+    )
+    d._resync()
+    assert "w2:p9" in d._legacy_release and "w1:p1" not in d._legacy_release
+
+
+def test_resync_salvages_legacy_row_by_unique_label_match():
+    # moved between old daemon's crash and our first snapshot: no terminal_id;
+    # exactly one pane carries our stored label -> remap to it
+    moved = _agent(pane="w2:p9", status="working")
+    moved["custom_status"] = "2/5 X"
+    client = FakeClient([moved], release_ok=False)
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+            }
+        ]
+    )
+    d._resync()
+    assert "w2:p9" in d._legacy_release and "w1:p1" not in d._legacy_release
+
+
+def test_resync_drops_unmatchable_legacy_row():
+    client = FakeClient([_agent(pane="w3:p1", status="idle")])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+            }
+        ]
+    )
+    d._resync()
+    assert d._legacy_release == {}  # no terminal, no label match -> gone
+
+
+def test_resync_drops_stale_session_cache():
+    client = FakeClient([_claude_agent(status="idle")])
+    d = make_daemon(client, progress=lambda sid: "2/5 x")
+    seed(d, client)
+    assert d._session_cache.get("w1:p1")
+    client.set_agents([])
+    d._resync()
+    assert "w1:p1" not in d._session_cache
