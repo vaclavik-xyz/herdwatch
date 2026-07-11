@@ -15,7 +15,7 @@ from . import gitctx, herdr_socket
 from .aggregate import aggregate
 from .cache import TTLCache
 from .config import Config
-from .herdr import HerdrClient
+from .herdr import HerdrClient, validate_agent_record
 from .herdr_socket import HerdrApiError, HerdrUnavailable
 from .markers import MarkerStore
 from .models import PaneContext, Pending
@@ -169,6 +169,10 @@ class Daemon:
         return (self._clock() if now is None else now) >= self._resync_not_before
 
     def _remember_record(self, rec: dict) -> None:
+        agent = rec.get("agent")
+        if agent is not None and agent != "claude":
+            self._session_cache.pop(rec["pane_id"], None)
+            return
         session = (rec.get("agent_session") or {}).get("value")
         if session:
             self._session_cache[rec["pane_id"]] = session
@@ -279,50 +283,8 @@ class Daemon:
             )
         records = {}
         for agent in agents:
-            if not isinstance(agent, dict):
-                raise HerdrUnavailable(
-                    "session.snapshot agent entries must be objects"
-                )
-            pane_id = agent.get("pane_id")
-            if not isinstance(pane_id, str) or not pane_id:
-                raise HerdrUnavailable(
-                    "session.snapshot agent pane_id must be a string"
-                )
-            terminal_id = agent.get("terminal_id")
-            if terminal_id is not None and (
-                not isinstance(terminal_id, str) or not terminal_id
-            ):
-                raise HerdrUnavailable(
-                    "session.snapshot agent terminal_id must be a nonempty "
-                    "string or null"
-                )
-            for field in (
-                "agent",
-                "agent_status",
-                "cwd",
-                "foreground_cwd",
-                "custom_status",
-            ):
-                value = agent.get(field)
-                if value is not None and not isinstance(value, str):
-                    raise HerdrUnavailable(
-                        f"session.snapshot agent {field} must be a string "
-                        "or null"
-                    )
-            session = agent.get("agent_session")
-            if session is not None and not isinstance(session, dict):
-                raise HerdrUnavailable(
-                    "session.snapshot agent agent_session must be an object "
-                    "or null"
-                )
-            if isinstance(session, dict):
-                for field in ("source", "agent", "kind", "value"):
-                    value = session.get(field)
-                    if value is not None and not isinstance(value, str):
-                        raise HerdrUnavailable(
-                            "session.snapshot agent agent_session."
-                            f"{field} must be a string or null"
-                        )
+            validate_agent_record(agent, context="session.snapshot agent")
+            pane_id = agent["pane_id"]
             records[pane_id] = agent
         return records
 
@@ -1292,6 +1254,10 @@ class Daemon:
                 rec.get("agent_status") != "working"
                 or (rec.get("agent") or "") != "claude"
             ):
+                if mp is not None:
+                    self._clear_metadata(
+                        pane_id, "not a working Claude pane"
+                    )
                 continue
             session = (
                 (rec.get("agent_session") or {}).get("value")

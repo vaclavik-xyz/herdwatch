@@ -897,6 +897,21 @@ def test_progress_cleared_when_no_active_task():
     assert "w1:p1" not in d.managed
 
 
+def test_progress_cleared_when_working_pane_changes_agent():
+    client = FakeClient([_claude_agent()])
+    d = make_daemon(client, progress=lambda sid: "2/5 Fixing auth")
+    seed(d, client)
+    d._progress_sweep()
+
+    client.set_agents([_agent(status="working", agent="codex")])
+    seed(d, client)
+    d._progress_sweep()
+
+    assert client.metadata[-1] == ("w1:p1", None, True, None)
+    assert "w1:p1" not in d.managed
+    assert "w1:p1" not in d._session_cache
+
+
 def test_done_metadata_set_failure_retries_next_sweep():
     client = FakeClient([_agent(status="done")], meta_ok=False)
     d = make_daemon(

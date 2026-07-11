@@ -59,6 +59,22 @@ def test_agent_get_returns_record_and_none_on_failure():
     assert HerdrClient(request=FakeRequest({"agent.get": HerdrApiError("not_found", "x")})).agent_get("w1:p1") is None
 
 
+@pytest.mark.parametrize(
+    "agent",
+    [
+        {"pane_id": "w1:p1", "agent_session": ["bad"]},
+        {"pane_id": "w1:p1", "agent_session": {"value": ["bad"]}},
+        {"pane_id": "w1:p1", "terminal_id": ["bad"]},
+        {"pane_id": "w1:p1", "agent_status": ["working"]},
+        {"pane_id": "w2:p1", "agent_status": "idle"},
+    ],
+)
+def test_agent_get_rejects_malformed_records(agent):
+    request = FakeRequest({"agent.get": {"agent": agent}})
+
+    assert HerdrClient(request=request).agent_get("w1:p1") is None
+
+
 def test_report_agent_sends_params_and_maps_result():
     req = FakeRequest({
         "pane.report_agent": {"type": "ok"},

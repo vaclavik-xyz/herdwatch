@@ -22,6 +22,56 @@ from .herdr_socket import HerdrApiError, HerdrUnavailable
 log = logging.getLogger(__name__)
 
 
+def validate_agent_record(
+    record,
+    *,
+    context: str = "agent record",
+    expected_pane_id: str | None = None,
+) -> dict:
+    """Validate agent data before daemon bookkeeping can observe it."""
+    if not isinstance(record, dict):
+        raise HerdrUnavailable(f"{context} must be an object")
+    pane_id = record.get("pane_id")
+    if not isinstance(pane_id, str) or not pane_id:
+        raise HerdrUnavailable(f"{context} pane_id must be a string")
+    if expected_pane_id is not None and pane_id != expected_pane_id:
+        raise HerdrUnavailable(
+            f"{context} pane_id does not match requested pane"
+        )
+    terminal_id = record.get("terminal_id")
+    if terminal_id is not None and (
+        not isinstance(terminal_id, str) or not terminal_id
+    ):
+        raise HerdrUnavailable(
+            f"{context} terminal_id must be a nonempty string or null"
+        )
+    for field in (
+        "agent",
+        "agent_status",
+        "cwd",
+        "foreground_cwd",
+        "custom_status",
+    ):
+        value = record.get(field)
+        if value is not None and not isinstance(value, str):
+            raise HerdrUnavailable(
+                f"{context} {field} must be a string or null"
+            )
+    session = record.get("agent_session")
+    if session is not None and not isinstance(session, dict):
+        raise HerdrUnavailable(
+            f"{context} agent_session must be an object or null"
+        )
+    if isinstance(session, dict):
+        for field in ("source", "agent", "kind", "value"):
+            value = session.get(field)
+            if value is not None and not isinstance(value, str):
+                raise HerdrUnavailable(
+                    f"{context} agent_session.{field} must be a string or null"
+                )
+    return record
+
+
 class HerdrClient:
     def __init__(self, socket_path: str | None = None,
                  request: Callable[..., dict] = herdr_socket.request) -> None:
@@ -63,7 +113,17 @@ class HerdrClient:
             log.debug("agent.get %s failed: %s", pane_id, exc)
             return None
         agent = result.get("agent")
-        return agent if isinstance(agent, dict) else None
+        if agent is None:
+            return None
+        try:
+            return validate_agent_record(
+                agent,
+                context="agent.get agent",
+                expected_pane_id=pane_id,
+            )
+        except HerdrUnavailable as exc:
+            log.warning("agent.get %s returned invalid data: %s", pane_id, exc)
+            return None
 
     def report_agent(self, pane_id: str, source: str, agent: str, state: str,
                      custom_status: str | None = None) -> bool | None:
