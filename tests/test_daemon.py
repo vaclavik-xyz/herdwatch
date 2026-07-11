@@ -1113,6 +1113,62 @@ def test_legacy_release_retried_until_confirmed():
     assert "w2:p1" not in d._legacy_release
 
 
+def test_legacy_cleanup_skips_entry_remapped_during_yield():
+    client = FakeClient(
+        [
+            _agent(pane="w1:p1", status="idle", term="term-one"),
+            _agent(pane="w2:p1", status="idle", term="term-two"),
+        ]
+    )
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "1/2 First",
+                "kind": "progress",
+                "terminal_id": "term-one",
+            },
+            {
+                "pane_id": "w2:p1",
+                "agent": "claude",
+                "status": "2/2 Second",
+                "kind": "progress",
+                "terminal_id": "term-two",
+            },
+        ]
+    )
+    seed(d, client)
+    yields = {"count": 0}
+
+    def yield_control():
+        yields["count"] += 1
+        if yields["count"] == 2:
+            client.set_agents(
+                [
+                    _agent(
+                        pane="w2:p1",
+                        status="idle",
+                        agent="codex",
+                        term="term-recycled",
+                    ),
+                    _agent(
+                        pane="w3:p9",
+                        status="idle",
+                        term="term-two",
+                    ),
+                ]
+            )
+            assert d._resync() is True
+        return True
+
+    d._reprobe_sweep(yield_control)
+
+    assert client.releases == ["w1:p1"]
+    assert set(d._legacy_release) == {"w3:p9"}
+
+
 def test_legacy_cleanup_drops_foreign_session_without_release():
     client = FakeClient([_owned_agent()])
     d = make_daemon(client)

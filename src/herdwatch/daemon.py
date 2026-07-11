@@ -1185,6 +1185,11 @@ class Daemon:
             self._publish()
             return
         for pane_id, mp in list(self._legacy_release.items()):
+            if self._legacy_release.get(pane_id) is not mp:
+                if not yield_now():
+                    self._publish()
+                    return
+                continue
             owner = self._foreign_session_owner(pane_id)
             if owner is not None:
                 del self._legacy_release[pane_id]
