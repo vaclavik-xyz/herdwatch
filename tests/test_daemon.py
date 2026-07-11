@@ -1996,6 +1996,45 @@ def test_terminal_less_adopted_hold_ignores_unrelated_move():
     assert d._resync_due is True
 
 
+def test_terminal_less_hold_is_not_poisoned_by_stale_matching_move():
+    current = _agent(
+        pane="w1:p1", status="working", agent="claude", term="term-current"
+    )
+    current["custom_status"] = "⏳ review"
+    client = FakeClient([current])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+            }
+        ]
+    )
+    seed(d, client)
+    stale = _agent(
+        pane="w2:p9", status="working", agent="claude", term="term-stale"
+    )
+    stale["custom_status"] = "⏳ review"
+
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "pane": stale,
+            },
+        }
+    )
+
+    assert d.managed["w1:p1"].terminal_id == ""
+    assert set(d._registry) == {"w1:p1"}
+    assert d._resync_due is True
+
+
 def test_pane_moved_to_denied_pane_releases():
     client = FakeClient([_agent(status="idle")])
     probe = StaticProbe(Pending("review", 30, "roborev"))

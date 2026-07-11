@@ -535,14 +535,14 @@ class Daemon:
         old_record = self._registry.get(old)
         new_record = self._registry.get(new)
         tracked = self.managed.get(old) or self._legacy_release.get(old)
-        if tracked is not None and not tracked.terminal_id:
+        terminal_less_tracked = tracked is not None and not tracked.terminal_id
+        if terminal_less_tracked:
             if (
                 not terminal_id
                 or not self._record_matches_label(pane, tracked)
             ):
                 self._schedule_resync(debounce=False)
                 return
-            tracked.terminal_id = terminal_id
         if old_record is None:
             if (
                 terminal_id
@@ -553,7 +553,10 @@ class Daemon:
             if (
                 not terminal_id
                 or tracked is None
-                or tracked.terminal_id != terminal_id
+                or (
+                    tracked.terminal_id
+                    and tracked.terminal_id != terminal_id
+                )
             ):
                 self._schedule_resync()
                 return
@@ -562,6 +565,8 @@ class Daemon:
             # let the next coalesced snapshot decide what is true now.
             self._schedule_resync()
             return
+        if terminal_less_tracked:
+            tracked.terminal_id = terminal_id
         self._remap(old, new, pane)
         # The per-pane agent_status_changed subscription is bound to the OLD
         # public pane id and goes silent after a move (herdr matches events
