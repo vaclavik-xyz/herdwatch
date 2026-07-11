@@ -205,6 +205,25 @@ def test_idle_metadata_upgrades_to_hold_when_foreign_owner_disappears():
     assert d.managed["w1:p1"].kind == "hold"
 
 
+def test_verified_hold_falls_back_when_foreign_owner_appears():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    assert d.managed["w1:p1"].kind == "hold"
+
+    client.set_agents([_owned_agent()])
+    d._reprobe_sweep()
+
+    assert client.releases == []
+    assert client.metadata[-1] == ("w1:p1", "⏳ review", False, 1000)
+    assert d.managed["w1:p1"].kind == "idle-meta"
+
+
 def test_foreign_session_idle_metadata_clears_without_lifecycle_release():
     client = FakeClient([_owned_agent()])
     probe = StaticProbe(Pending("review", 30, "roborev"))
@@ -583,6 +602,40 @@ def test_shutdown_retains_unverified_hold_when_readback_is_unavailable():
     assert client.releases == []
     assert d.managed["w1:p1"].kind == "hold-pending"
     assert snapshots[-1][0]["meta"] is False
+
+
+def test_shutdown_drops_verified_hold_when_foreign_owner_appears():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.set_agents([_owned_agent()])
+
+    d.shutdown()
+
+    assert client.releases == []
+    assert d.managed == {}
+
+
+def test_shutdown_retains_verified_hold_when_readback_is_unavailable():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+    client.set_agents([])
+
+    d.shutdown()
+
+    assert client.releases == []
+    assert d.managed["w1:p1"].kind == "hold"
 
 
 def test_unverified_report_falls_back_when_foreign_owner_becomes_visible():
@@ -1188,6 +1241,52 @@ def test_legacy_cleanup_drops_foreign_session_without_release():
 
     assert client.releases == []
     assert d._legacy_release == {}
+
+
+def test_shutdown_refreshes_owner_before_legacy_cleanup():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
+    seed(d, client)
+    client.set_agents([_owned_agent()])
+
+    d.shutdown()
+
+    assert client.releases == []
+    assert d._legacy_release == {}
+
+
+def test_shutdown_retains_legacy_cleanup_when_readback_is_unavailable():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
+    seed(d, client)
+    client.set_agents([])
+
+    d.shutdown()
+
+    assert client.releases == []
+    assert set(d._legacy_release) == {"w1:p1"}
 
 
 def test_release_gone_keeps_entry_and_schedules_resync():

@@ -819,6 +819,14 @@ class Daemon:
 
     # ---------- assert / release primitives ----------
 
+    def _readback_record(self, pane_id: str) -> dict | None:
+        observed = self._client.agent_get(pane_id)
+        if observed is None:
+            return None
+        self._registry[pane_id] = observed
+        self._remember_record(observed)
+        return observed
+
     def _foreign_session_owner(self, pane_id: str) -> str | None:
         """Return a session owner that herdwatch must not displace.
 
@@ -901,22 +909,24 @@ class Daemon:
         else:
             self._last_probe.pop(pane_id, None)
 
-    def _release_hold(self, pane_id: str, reason: str) -> bool:
+    def _release_hold(
+        self, pane_id: str, reason: str, *, refresh: bool = False
+    ) -> bool:
         mp = self.managed.get(pane_id)
         if mp is None:
             return True
-        if mp.kind == "hold-pending":
-            observed = self._client.agent_get(pane_id)
+        observed = None
+        if refresh or mp.kind == "hold-pending":
+            observed = self._readback_record(pane_id)
             if observed is None:
                 self._last_probe.pop(pane_id, None)
                 log.warning(
-                    "cannot verify pending hold %s for cleanup yet; keeping "
-                    "it to retry",
+                    "cannot verify hold %s for cleanup yet; keeping it to "
+                    "retry",
                     pane_id,
                 )
                 return False
-            self._registry[pane_id] = observed
-            self._remember_record(observed)
+        if mp.kind == "hold-pending":
             if not self._record_matches_hold(observed, mp):
                 del self.managed[pane_id]
                 self._adopted.discard(pane_id)
@@ -1117,7 +1127,11 @@ class Daemon:
 
         if mp is not None and mp.kind == "hold":
             if label:
-                if mp.custom_status != label or pane_id in self._adopted:
+                if (
+                    self._foreign_session_owner(pane_id) is not None
+                    or mp.custom_status != label
+                    or pane_id in self._adopted
+                ):
                     self._assert_hold(pane_id, agent_name, label)
                 return True
             if not self._release_hold(pane_id, "work cleared"):
@@ -1299,7 +1313,7 @@ class Daemon:
         for pane_id, mp in list(self.managed.items()):
             try:
                 if mp.kind in SEMANTIC_HOLD_KINDS:
-                    self._release_hold(pane_id, "shutdown")
+                    self._release_hold(pane_id, "shutdown", refresh=True)
                 else:
                     # Metadata self-expires via TTL; drop the row either way.
                     self._client.report_metadata(
@@ -1316,6 +1330,13 @@ class Daemon:
 
         for pane_id, mp in list(self._legacy_release.items()):
             try:
+                if self._readback_record(pane_id) is None:
+                    log.warning(
+                        "cannot verify legacy cleanup %s on shutdown; "
+                        "keeping it to retry",
+                        pane_id,
+                    )
+                    continue
                 owner = self._foreign_session_owner(pane_id)
                 if owner is not None:
                     del self._legacy_release[pane_id]
