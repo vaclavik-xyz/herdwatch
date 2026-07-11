@@ -53,6 +53,65 @@ def test_status_labels_progress_and_hold_panes(tmp_path, monkeypatch, capsys):
     assert "holding w2:p2  ⏳ review  (claude)" in out
 
 
+def test_status_prints_kind_verbs(monkeypatch, capsys):
+    from herdwatch import cli as cli_mod
+
+    class Snap:
+        pid = 1
+        updated_at = 0.0
+        panes = [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ CI",
+                "kind": "hold",
+            },
+            {
+                "pane_id": "w2:p1",
+                "agent": "claude",
+                "status": "3/7 X",
+                "kind": "progress",
+            },
+            {
+                "pane_id": "w3:p1",
+                "agent": "claude",
+                "status": "⏳ rev",
+                "kind": "done",
+            },
+            {
+                "pane_id": "w4:p1",
+                "agent": "claude",
+                "status": "⏳ CI",
+                "kind": "idle-meta",
+            },
+            {
+                "pane_id": "w5:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold-pending",
+            },
+        ]
+
+    class Store:
+        def read(self):
+            return Snap()
+
+    monkeypatch.setattr(cli_mod, "_state_store", lambda: Store())
+    monkeypatch.setattr(cli_mod._state, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        cli_mod,
+        "_store",
+        lambda: type("S", (), {"all": lambda self: []})(),
+    )
+    cli_mod.main(["status"])
+    out = capsys.readouterr().out
+    assert "holding w1:p1" in out
+    assert "working w2:p1" in out
+    assert "labeling w3:p1" in out
+    assert "labeling w4:p1" in out
+    assert "verifying w5:p1" in out
+
+
 def test_status_lists_markers_and_panes(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "MARKER_DIR", str(tmp_path / "markers"))
     MarkerStore(tmp_path / "markers").add("w9:p9", "deploy")
@@ -74,10 +133,12 @@ def test_daemon_recovers_only_from_dead_snapshot(monkeypatch):
     class FakeDaemon:
         def __init__(self):
             self.adopted = None
+
         def adopt(self, r):
             self.adopted = r
-        def run(self, interval):
-            pass
+
+        def run(self):
+            self.ran = True
 
     fake = FakeDaemon()
     monkeypatch.setattr(cli, "load_config", lambda p: Config())
@@ -92,11 +153,14 @@ def test_daemon_recovers_only_from_dead_snapshot(monkeypatch):
     monkeypatch.setattr(cli, "_state_store", lambda: store_with_pid(2_000_000_000))
     assert cli.main(["daemon"]) == 0
     assert fake.adopted == rows  # dead pid -> recovered
+    assert fake.ran is True
 
     fake.adopted = None
+    fake.ran = False
     monkeypatch.setattr(cli, "_state_store", lambda: store_with_pid(os.getpid()))
     assert cli.main(["daemon"]) == 0
     assert fake.adopted is None  # live daemon owns it -> not touched
+    assert fake.ran is True
 
 
 def test_add_and_list_marker(tmp_path, monkeypatch, capsys):

@@ -12,6 +12,14 @@ from .config import load as load_config
 from .daemon import MARKER_DIR, build_daemon
 from .markers import MarkerStore
 
+_VERBS = {
+    "hold": "holding",
+    "hold-pending": "verifying",
+    "idle-meta": "labeling",
+    "progress": "working",
+    "done": "labeling",
+}
+
 
 def _store() -> MarkerStore:
     return MarkerStore(MARKER_DIR)
@@ -33,7 +41,7 @@ def _cmd_daemon(args) -> int:
     snap = _state_store().read()
     if snap and snap.panes and not _state.pid_alive(snap.pid):
         daemon.adopt(snap.panes)
-    daemon.run(cfg.poll_interval_s)
+    daemon.run()
     return 0
 
 
@@ -76,7 +84,7 @@ def _cmd_status(args) -> int:
                   "panes below may be stale — check `herdwatch doctor`")
         if snap.panes:
             for p in snap.panes:
-                verb = "working" if p.get("kind") == "progress" else "holding"
+                verb = _VERBS.get(p.get("kind", "hold"), "holding")
                 print(f"{verb} {p['pane_id']}  {p['status']}  ({p['agent']})")
         else:
             print("holding no panes")

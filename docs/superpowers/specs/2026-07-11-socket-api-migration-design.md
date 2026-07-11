@@ -1,7 +1,7 @@
 # herdwatch: migrate to the herdr socket API (event-driven daemon)
 
 **Date:** 2026-07-11
-**Status:** approved
+**Status:** implemented
 
 ## Goal
 
@@ -45,8 +45,12 @@ These shaped the design; implementers should not need to re-derive them:
   `~/.config/herdr/herdr.sock`.
 - `pane.agent_status_changed` subscriptions are **per-pane** (`pane_id`
   required); there is no global variant. Global subscriptions used here:
-  `pane.created`, `pane.closed`, `pane.exited`, `pane.agent_detected`,
-  `pane.moved`, `workspace.closed`, `tab.closed`.
+  `pane.created`, `pane.closed`, `pane.exited`, `pane.moved`,
+  `workspace.closed`, `tab.closed`. `pane.agent_detected` is deliberately
+  omitted on herdr 0.7.3; its retained replay destabilizes the shared status
+  stream. Status subscriptions cover every snapshot pane, including panes
+  whose current agent state is `unknown`, so the following status edge still
+  triggers immediate discovery and resync.
 - A cross-workspace `pane.move` keeps the internal pane (and any agent
   assertion on it) alive but assigns a **new public pane id**; herdr emits
   `pane.moved` (payload carries `previous_pane_id` and the new `pane`
@@ -100,9 +104,9 @@ These shaped the design; implementers should not need to re-derive them:
 5. **Events are triggers, snapshots are truth.** Only `agent_status_changed`
    (hot path) and `pane.moved` (bookkeeping remap — a resync would
    misclassify the old id as vanished) are handled incrementally. All other
-   lifecycle events (`pane.created`, `pane.closed`, `pane.exited`,
-   `pane.agent_detected`, `workspace.closed`, `tab.closed`) merely schedule
-   an immediate resync + resubscribe. This avoids incremental-registry bugs.
+   subscribed lifecycle events (`pane.created`, `pane.closed`, `pane.exited`,
+   `workspace.closed`, `tab.closed`) merely schedule an immediate resync +
+   resubscribe. This avoids incremental-registry bugs.
 
 ## Architecture
 
@@ -150,6 +154,12 @@ State:
   records the pane's **`terminal_id`** (from the registry record at assert
   time) for move reconciliation. `kind` gains a value:
   - `"hold"` — idle pane held `working` via `report_agent` (unchanged).
+  - `"hold-pending"` — `report_agent` returned success but its immediate
+    `agent.get` readback was unavailable; keep semantic cleanup ownership and
+    retry verification before either release or fallback.
+  - `"idle-meta"` — herdr rejected a semantic hold because another source
+    owns the official agent session; show TTL-backed metadata without ever
+    releasing that foreign lifecycle owner.
   - `"progress"` — working pane's task label, now via `report_metadata`.
   - `"done"` — done pane's ⏳ label via `report_metadata`.
 - `_session_cache` — unchanged (herdr still omits `agent_session` for
@@ -167,9 +177,10 @@ Main loop (single thread):
    registry built from a pre-subscribe snapshot could go stale for up to a
    full resync. If B's pane set differs from A's, resubscribe with B and
    repeat. Adopt from the state file (same pid-liveness rule as today):
-   `"hold"` rows re-adopt as now; rows flagged `"meta": true` (written by
-   this daemon generation for `progress`/`done` kinds) are **skipped** —
-   their metadata self-expires via TTL; **remaining non-`"hold"` rows
+   `"hold"`/`"hold-pending"` rows re-adopt as now; rows flagged `"meta": true` (written by
+   this daemon generation for `idle-meta`/`progress`/`done` kinds) are **skipped** —
+   their metadata self-expires via TTL; **remaining rows outside
+   `"hold"`/`"hold-pending"` without the flag
    (pre-migration, no `meta` flag) go into a legacy-release set retried
    each reprobe sweep until `release_agent` confirms (success or
    `not_found`)** — they may come from a
@@ -252,7 +263,7 @@ Main loop (single thread):
    is ineligible, release/clear it with the normal retry-until-confirmed
    semantics instead of continuing to manage it.
 6. **Reprobe sweep:** at the unchanged 15 s cadence (per-pane throttle),
-   probe **(a) every managed `"hold"` and `"done"` pane, (b) every
+   probe **(a) every managed `"hold"`, `"idle-meta"`, and `"done"` pane, (b) every
    unmanaged eligible `idle`/`done` registry pane, and (c) every managed
    `"progress"` pane whose registry status is no longer `working`** —
    (c) is the recovery path for a working→idle/done edge whose event was
@@ -272,7 +283,7 @@ Main loop (single thread):
    event-driven alone would never update them. A dedicated sweep (default
    4 s, `[progress] interval_s`) iterates registry panes with
    `status == working` and `agent == claude` **that are unmanaged or
-   already `kind == "progress"`** — never `"hold"`/`"done"` panes. This
+   already `kind == "progress"`** — never `"hold"`/`"idle-meta"`/`"done"` panes. This
    preserves today's `mp is None or mp.kind == "progress"` guard
    (`test_hold_pane_not_probed_by_progress_path`): a held pane reports
    `working` from our own assertion and often still has an in-progress
@@ -292,7 +303,8 @@ per-pane probe throttle is the backstop against any remaining loop.
 
 | Pane state | Pending work | Action (source `herdwatch`) |
 | --- | --- | --- |
-| `idle` | yes | `report_agent working` + ⏳ label — **unchanged** |
+| `idle`, no foreign session owner | yes | `report_agent working` + ⏳ label; verify via `agent.get` before recording ownership |
+| `idle`, official session owner | yes | `report_metadata custom_status="⏳ …"`; semantic state stays `idle`, kind `idle-meta` |
 | `idle` | no | `release_agent` if held — unchanged |
 | `done` | yes | `report_metadata custom_status="⏳ …" ttl_ms=2×reprobe` (refreshed each reprobe); semantic state stays `done` |
 | `done` | no / cleared | `report_metadata clear_custom_status` |
@@ -311,13 +323,13 @@ TTL = `2 × reprobe_interval_s × 1000` ms, clamped to herdr's accepted
 `ttl_ms` range — effectively `[1000, 86_400_000]` — so a misconfigured
 `reprobe_interval_s` (0, negative, > 12 h) cannot produce an invalid
 request. Because metadata self-expires,
-`"progress"` and `"done"` kinds are **not re-adopted** after a crash — TTL
+`"idle-meta"`, `"progress"`, and `"done"` kinds are **not re-adopted** after a crash — TTL
 cleans up orphans, and the next event/resync re-asserts if still warranted.
-Only `"hold"` (a semantic assertion with no TTL) keeps the adopt path. All
+Only `"hold"`/`"hold-pending"` (semantic assertions with no TTL) keep the adopt path. All
 kinds stay in the state file so `herdwatch status` can show them.
 
-`herdwatch status` verb per kind: `holding` (hold), `working` (progress),
-`labeling` (done).
+`herdwatch status` verb per kind: `holding` (hold), `verifying`
+(hold-pending), `working` (progress), `labeling` (idle-meta/done).
 
 ## Error handling & recovery
 
@@ -328,6 +340,17 @@ kinds stay in the state file so `herdwatch status` can show them.
   (0.5 s base, 30 s cap; herdeck `connector.py` pattern), then full
   re-bootstrap (snapshot + subscribe + sweep). Log once per distinct failure
   reason, not per retry.
+- **Retained lifecycle replay** → do not subscribe to the noisy
+  `pane.agent_detected` feed on herdr 0.7.3, validate `pane.moved` against the
+  stable `terminal_id`, and coalesce lifecycle triggers behind a 250 ms
+  selector deadline. Status events are verified against `agent.get`, so a
+  retained stale status cannot overwrite snapshot truth.
+- **Semantic report silently ignored** → `report_agent` reads back
+  `agent_status`/`custom_status`; an official foreign `agent_session.source` is
+  handled as metadata-only up front, so herdwatch never issues the dangerous
+  unmatched `release_agent` call. If readback itself is unavailable, retain a
+  non-metadata `hold-pending` row and retry; never guess that the durable write
+  failed or release it before ownership is confirmed.
 - **`request()` failure** (herdr down/restarting) → same semantics as
   today's `rc != 0`: asserts aren't recorded, releases keep bookkeeping and
   retry; the failed pane's throttle is cleared so retry is prompt.
@@ -338,8 +361,10 @@ kinds stay in the state file so `herdwatch status` can show them.
 - **Missed events** (hub overflow, subscribe gaps) → covered by the resync
   timer and the reprobe sweep; correctness never depends on seeing every
   event.
-- **Clean shutdown** (SIGTERM/atexit): `release_agent` all `"hold"` panes
-  and `clear_custom_status` all `"progress"`/`"done"` panes.
+- **Clean shutdown** (SIGTERM/atexit): `release_agent` all verified `"hold"` panes
+  and `clear_custom_status` all `"idle-meta"`/`"progress"`/`"done"` panes.
+  A still-unverifiable `"hold-pending"` row remains persisted for retry after
+  restart rather than risking an orphan or a foreign-authority release.
 
 ## Config & compatibility
 
@@ -348,6 +373,10 @@ kinds stay in the state file so `herdwatch status` can show them.
 - `poll_interval_s` — no longer used; if present in config, log a one-line
   deprecation notice and ignore it. `reprobe_interval_s` unchanged.
 - `herdr-plugin.toml`: `min_herdr_version = "0.7.2"`.
+- Per-pane status subscriptions are created for every pane in the snapshot,
+  not only entries already present in `snapshot.agents`. This preserves live
+  discovery when an `unknown` pane starts an agent while avoiding herdr
+  0.7.3's replay-broken generic detection feed.
 - `doctor` gains two required checks driven by one `session.snapshot`
   round-trip: "herdr socket reachable" (any response, even an error, proves
   the socket) and "herdr ≥ 0.7.2" (the snapshot being accepted proves the
@@ -366,11 +395,12 @@ kinds stay in the state file so `herdwatch status` can show them.
   with a fake client + fake stream. Every current behavior
   (throttle, adopt, failed release retry, vanished panes, progress,
   allow/deny) must keep a test. New tests: done-pane metadata lifecycle,
+  foreign-session idle metadata fallback without lifecycle release,
   TTL refresh + clamp boundaries, self-echo guard, progress sweep (label
   change with no herdr event), unmanaged idle/done pane picked up by the
   reprobe sweep (late marker), held pane (status `working` from our own
   assertion) still reprobed and released when work clears, progress sweep
-  never claims a `"hold"`/`"done"` pane, managed `"progress"` pane with a
+  never claims a `"hold"`/`"idle-meta"`/`"done"` pane, managed `"progress"` pane with a
   missed working→idle edge recovered by the reprobe sweep, `pane.moved`
   remaps bookkeeping to the new pane id, missed `pane.moved` recovered by
   `terminal_id` remap at resync, remapped pane re-checked against
@@ -383,7 +413,9 @@ kinds stay in the state file so `herdwatch status` can show them.
   row moved between failed and successful release attempts (event remap
   and resync remap), label-match salvage (unique match remaps,
   ambiguous/no match drops), `"hold"` row moved while the daemon was
-  down remapped via persisted `terminal_id` on first resync.
+  down remapped via persisted `terminal_id` on first resync, retained-event
+  replay coalescing, redundant detection suppression, and stale move replay
+  rejection.
 - Live verification against the running herdr 0.7.3 before merge (verify
   skill): idle-edge latency, done-pane ⏳ visible, progress label without
   state masking, daemon restart reconciliation.

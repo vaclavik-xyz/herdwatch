@@ -1,60 +1,150 @@
+# src/herdwatch/herdr.py
+"""HerdrClient: herdwatch's facade over the raw herdr socket API.
+
+Most write methods keep boolean semantics (False = failed, retry later) so
+the daemon's retry logic stays transport-agnostic; metadata `clear` treats
+a structured `not_found` as success (the pane is gone and its metadata
+with it). `release_agent` is the exception — it returns "ok" / "gone" /
+"failed", because `not_found` may mean the pane was *moved* (assertion
+alive under a new pane id): the caller must reconcile before dropping
+bookkeeping. `session_snapshot` raises instead — the daemon needs to tell
+"herdr is down" (HerdrUnavailable, retry with backoff) from "server too
+old for session.snapshot" (HerdrApiError, log the >= 0.7.2 requirement).
+"""
 from __future__ import annotations
 
-import json
-import subprocess
+import logging
 from typing import Callable
 
+from . import herdr_socket
+from .herdr_socket import HerdrApiError, HerdrUnavailable
 
-def _run(args: list[str]) -> tuple[int, str]:
-    try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=10)
-        return r.returncode, r.stdout
-    except Exception:
-        return 1, ""
+log = logging.getLogger(__name__)
 
 
 class HerdrClient:
-    def __init__(self, herdr_bin: str = "herdr",
-                 run: Callable[[list[str]], tuple[int, str]] = _run) -> None:
-        self._bin = herdr_bin
-        self._run = run
+    def __init__(self, socket_path: str | None = None,
+                 request: Callable[..., dict] = herdr_socket.request) -> None:
+        self._socket_path = socket_path
+        self._request = request
 
-    def _json(self, args: list[str]) -> dict:
-        rc, out = self._run(args)
-        if rc != 0 or not out.strip():
-            return {}
+    def _call(self, method: str, params: dict) -> dict:
+        """Raises HerdrApiError / HerdrUnavailable."""
+        return self._request(method, params, socket_path=self._socket_path)
+
+    def _call_bool(self, method: str, params: dict, *, not_found_ok: bool) -> bool:
         try:
-            return json.loads(out)
-        except Exception:
-            return {}
+            self._call(method, params)
+            return True
+        except HerdrApiError as exc:
+            if not_found_ok and exc.code == "not_found":
+                return True
+            log.warning("herdr %s failed: %s", method, exc)
+            return False
+        except HerdrUnavailable as exc:
+            log.warning("herdr unavailable for %s: %s", method, exc)
+            return False
 
-    def agent_list(self) -> list[dict]:
-        data = self._json([self._bin, "agent", "list"])
-        return (data.get("result") or {}).get("agents", [])
+    def session_snapshot(self) -> dict:
+        result = self._call("session.snapshot", {})
+        if not isinstance(result, dict):
+            raise HerdrUnavailable("session.snapshot result must be an object")
+        snapshot = result.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise HerdrUnavailable(
+                "session.snapshot result is missing the snapshot object"
+            )
+        return snapshot
 
-    def pane_process_info(self, pane_id: str) -> dict:
-        data = self._json([self._bin, "pane", "process-info", "--pane", pane_id])
-        return (data.get("result") or {}).get("process_info", {})
-
-    def agent_explain(self, pane_id: str) -> str | None:
-        """Live screen-detected agent state, independent of reported
-        sessions — the way to see the real state under our own assertion.
-        `agent explain --json` prints a top-level object, not {"result":...}.
-        """
-        data = self._json([self._bin, "agent", "explain", pane_id, "--json"])
-        state = data.get("state")
-        return state if isinstance(state, str) else None
+    def agent_get(self, pane_id: str) -> dict | None:
+        try:
+            result = self._call("agent.get", {"target": pane_id})
+        except (HerdrApiError, HerdrUnavailable) as exc:
+            log.debug("agent.get %s failed: %s", pane_id, exc)
+            return None
+        agent = result.get("agent")
+        return agent if isinstance(agent, dict) else None
 
     def report_agent(self, pane_id: str, source: str, agent: str, state: str,
-                     custom_status: str | None = None) -> bool:
-        args = [self._bin, "pane", "report-agent", pane_id, "--source", source,
-                "--agent", agent, "--state", state]
+                     custom_status: str | None = None) -> bool | None:
+        params = {"pane_id": pane_id, "source": source, "agent": agent, "state": state}
         if custom_status:
-            args += ["--custom-status", custom_status]
-        rc, _ = self._run(args)
-        return rc == 0
+            params["custom_status"] = custom_status
+        try:
+            self._call("pane.report_agent", params)
+        except HerdrApiError as exc:
+            log.warning("herdr pane.report_agent failed: %s", exc)
+            return False
+        except HerdrUnavailable as exc:
+            # The transport can fail after send (for example while reading the
+            # response), so application is unknown until a later readback.
+            log.warning("herdr pane.report_agent outcome is unknown: %s", exc)
+            return None
 
-    def release_agent(self, pane_id: str, source: str, agent: str) -> bool:
-        rc, _ = self._run([self._bin, "pane", "release-agent", pane_id,
-                           "--source", source, "--agent", agent])
-        return rc == 0
+        # Herdr <= 0.7.3 returns {"type": "ok"} even when its authority
+        # arbitration silently discards the report. Read the effective state
+        # back before telling the daemon that it owns a semantic assertion.
+        observed = self.agent_get(pane_id)
+        if observed is None:
+            log.warning(
+                "herdr accepted pane.report_agent for %s but its applied "
+                "state could not be verified yet",
+                pane_id,
+            )
+            return None
+        applied = (
+            observed.get("agent") == agent
+            and observed.get("agent_status") == state
+            and (
+                custom_status is None
+                or observed.get("custom_status") == custom_status
+            )
+        )
+        if not applied:
+            log.warning(
+                "herdr accepted pane.report_agent for %s but did not apply "
+                "the requested %s state",
+                pane_id,
+                state,
+            )
+        return applied
+
+    def release_agent(self, pane_id: str, source: str, agent: str) -> str:
+        """Returns "ok", "gone" (pane id unknown to herdr -- possibly moved,
+        the caller must reconcile before dropping bookkeeping), or "failed"."""
+        params = {"pane_id": pane_id, "source": source, "agent": agent}
+        try:
+            self._call("pane.release_agent", params)
+            return "ok"
+        except HerdrApiError as exc:
+            if exc.code == "not_found":
+                return "gone"
+            log.warning("herdr pane.release_agent failed: %s", exc)
+            return "failed"
+        except HerdrUnavailable as exc:
+            log.warning("herdr unavailable for pane.release_agent: %s", exc)
+            return "failed"
+
+    def report_metadata(self, pane_id: str, source: str, *, agent: str | None = None,
+                        custom_status: str | None = None,
+                        clear_custom_status: bool = False,
+                        ttl_ms: int | None = None) -> bool:
+        params: dict = {"pane_id": pane_id, "source": source}
+        if agent:
+            params["agent"] = agent
+        if clear_custom_status:
+            params["clear_custom_status"] = True
+        if custom_status is not None:
+            params["custom_status"] = custom_status
+        if ttl_ms is not None:
+            params["ttl_ms"] = ttl_ms
+        return self._call_bool("pane.report_metadata", params,
+                               not_found_ok=clear_custom_status)
+
+    def pane_process_info(self, pane_id: str) -> dict:
+        try:
+            result = self._call("pane.process_info", {"pane_id": pane_id})
+        except (HerdrApiError, HerdrUnavailable):
+            return {}
+        info = result.get("process_info")
+        return info if isinstance(info, dict) else {}

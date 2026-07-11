@@ -684,13 +684,15 @@ Replace `src/herdwatch/herdr.py` entirely:
 # src/herdwatch/herdr.py
 """HerdrClient: herdwatch's facade over the raw herdr socket API.
 
-Write methods keep boolean semantics (False = failed, retry later) so the
-daemon's retry logic stays transport-agnostic. `release`/`clear` calls
-treat a structured `not_found` as success: the pane is gone, so there is
-nothing left to release. `session_snapshot` raises instead — the daemon
-needs to tell "herdr is down" (HerdrUnavailable, retry with backoff) from
-"server too old for session.snapshot" (HerdrApiError, log the >= 0.7.2
-requirement).
+Most write methods keep boolean semantics (False = failed, retry later) so
+the daemon's retry logic stays transport-agnostic; metadata `clear` treats
+a structured `not_found` as success (the pane is gone and its metadata
+with it). `release_agent` is the exception — it returns "ok" / "gone" /
+"failed", because `not_found` may mean the pane was *moved* (assertion
+alive under a new pane id): the caller must reconcile before dropping
+bookkeeping. `session_snapshot` raises instead — the daemon needs to tell
+"herdr is down" (HerdrUnavailable, retry with backoff) from "server too
+old for session.snapshot" (HerdrApiError, log the >= 0.7.2 requirement).
 """
 from __future__ import annotations
 
@@ -1958,7 +1960,7 @@ def test_resync_releases_vanished_pane_and_drops_bookkeeping():
     seed(d, client)
     d._reprobe_sweep()
     client.set_agents([])
-    client._release_ok = False          # herdr can't release a gone pane
+    client._release_result = "gone"     # herdr can't release a gone pane
     d._resync()
     assert client.releases == ["w1:p1"]  # best-effort attempted
     assert d.managed == {}               # dropped regardless of outcome
@@ -2871,6 +2873,30 @@ No new code — an end-to-end check on this machine (herdr 0.7.3 runs locally wi
 - [ ] **Step 4:** Done-pane label: arrange a pane to reach `done` (finish an agent turn unfocused) with a marker pending; `herdr agent get` must show `agent_status: "done"` with our `custom_status`, and the sidebar shows `done · ⏳ …`. Focus the pane; the label must transition to a `working ⏳` hold.
 - [ ] **Step 5:** Restart resilience: `kill -9` the daemon while it holds a pane; restart it; the pane must be re-adopted (still ⏳, no orphan after work clears). Then `herdr server stop` + restart herdr while the daemon runs; the daemon must reconnect and re-assert within the backoff window.
 - [ ] **Step 6:** Record results (pane ids, observed latencies, anomalies) in the PR/merge description. Reinstall the launchd service if it was unloaded.
+
+#### Live verification results (2026-07-11, herdr 0.7.3)
+
+- Installed this branch into `.venv` and reinstalled launchd. All required and
+  optional `herdwatch doctor --json` checks passed; the service was left
+  running as PID 19385.
+- On scratch pane `wX:p1`, an unknown -> working -> idle transition acquired a
+  semantic marker hold in 0.587 s. On real idle pane `wT:p1`, whose official
+  `herdr:claude` session requires the metadata fallback on herdr 0.7.3, a 60 s
+  TTL marker appeared in 1.471 s and cleared 10.808 s after expiry. The pane
+  stayed semantically `idle`, with no managed row or label left behind.
+- On unfocused scratch pane `wZ:p1`, pending work preserved semantic `done` and
+  added `⏳ live done edge` in 0.758 s. Focusing the pane handed the display
+  metadata over to a semantic `working ⏳` hold in 0.581 s.
+- Killing launchd PID 68038 with SIGKILL produced PID 94792 in 0.011 s. The
+  existing hold stayed visible and the new daemon adopted its managed row; it
+  later cleared without an orphan.
+- Server restart was exercised in an isolated named session
+  (`herdwatch-e2e`) with a separate HOME, so the default session and its real
+  panes were not stopped. The daemon entered backoff while the socket was
+  absent, reconnected after restart, discarded the stale hold when herdr
+  restored the pane with a new `terminal_id`, and reasserted in 0.020 s after
+  the synthetic integration registered the restored pane. The named session,
+  scratch HOME, markers, and workspaces were removed afterward.
 
 ---
 
