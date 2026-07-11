@@ -174,8 +174,16 @@ Main loop (single thread):
    `report_agent` assertions with no TTL to clean them, so dropping them
    on a single failed attempt (herdr briefly down) would orphan the
    assertion forever. Entries in the set keep publishing to the state
-   file (original kind) so a crash mid-retry re-adopts them. Finish with
-   one full sweep.
+   file (original kind) so a crash mid-retry re-adopts them. Legacy
+   entries participate in move handling like managed panes: their
+   `terminal_id` (absent from pre-migration state files) is backfilled
+   from the first successful snapshot that still contains the pane_id,
+   after which `pane.moved` and resync reconciliation remap them; an
+   entry whose pane_id and `terminal_id` are both gone is dropped (the
+   assertion died with the pane). Residual gap, accepted: a pane moved
+   *between* the old daemon's crash and the new daemon's first snapshot
+   cannot be mapped (no `terminal_id` recorded) and is dropped. Finish
+   with one full sweep.
 2. **Wait:** `selectors` on the stream fd, timeout = time to the nearest
    deadline (per-pane reprobe, resync).
 3. **`agent_status_changed` event:** update registry; run the same per-pane
