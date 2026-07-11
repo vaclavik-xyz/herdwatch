@@ -111,6 +111,50 @@ def test_new_intervals_load_from_file(tmp_path):
     assert cfg.progress_interval_s == 2.5
 
 
+def test_nonpositive_or_nonfinite_intervals_use_safe_defaults(
+    tmp_path, caplog
+):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        "[daemon]\n"
+        "resync_interval_s = 0\n"
+        "reprobe_interval_s = -1\n"
+        "[progress]\n"
+        "interval_s = nan\n"
+    )
+
+    with caplog.at_level("WARNING"):
+        cfg = load(path=str(p))
+
+    assert cfg.resync_interval_s == 60.0
+    assert cfg.reprobe_interval_s == 15.0
+    assert cfg.progress_interval_s == 4.0
+    warnings = [
+        r
+        for r in caplog.records
+        if "must be a finite positive number" in r.message
+    ]
+    assert len(warnings) == 3
+
+
+def test_nonnumeric_intervals_use_safe_defaults(tmp_path, caplog):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        "[daemon]\n"
+        'resync_interval_s = "later"\n'
+        'reprobe_interval_s = "soon"\n'
+        "[progress]\n"
+        'interval_s = "often"\n'
+    )
+
+    with caplog.at_level("WARNING"):
+        cfg = load(path=str(p))
+
+    assert cfg.resync_interval_s == 60.0
+    assert cfg.reprobe_interval_s == 15.0
+    assert cfg.progress_interval_s == 4.0
+
+
 def test_poll_interval_is_ignored_with_warning(tmp_path, caplog):
     p = tmp_path / "config.toml"
     p.write_text("[daemon]\npoll_interval_s = 4\n")

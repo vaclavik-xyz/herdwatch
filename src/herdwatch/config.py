@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -13,6 +14,21 @@ DEFAULT_PATH = os.path.expanduser("~/.config/herdwatch/config.toml")
 # constantly spawn subprocesses, so descendant-scanning yields false positives.
 # The reliable signals (CI, roborev, markers) are on by default.
 _DEFAULT_PROBES = {"roborev": True, "ci": True, "bgjobs": False, "marker": True}
+
+
+def _positive_interval(value, default: float, key: str) -> float:
+    try:
+        interval = float(value)
+    except (TypeError, ValueError):
+        interval = math.nan
+    if math.isfinite(interval) and interval > 0:
+        return interval
+    log.warning(
+        "config: %s must be a finite positive number; using default %.1f",
+        key,
+        default,
+    )
+    return default
 
 
 @dataclass
@@ -42,10 +58,16 @@ def load(path: str | None = None) -> Config:
             "config: daemon.poll_interval_s is deprecated and ignored "
             "(the daemon is event-driven; see resync_interval_s)"
         )
-    cfg.resync_interval_s = float(
-        daemon.get("resync_interval_s", cfg.resync_interval_s)
+    cfg.resync_interval_s = _positive_interval(
+        daemon.get("resync_interval_s", cfg.resync_interval_s),
+        cfg.resync_interval_s,
+        "daemon.resync_interval_s",
     )
-    cfg.reprobe_interval_s = float(daemon.get("reprobe_interval_s", cfg.reprobe_interval_s))
+    cfg.reprobe_interval_s = _positive_interval(
+        daemon.get("reprobe_interval_s", cfg.reprobe_interval_s),
+        cfg.reprobe_interval_s,
+        "daemon.reprobe_interval_s",
+    )
     cfg.socket_path = str(daemon.get("socket_path", cfg.socket_path))
     probes_data = data.get("probes", {})
     for name in _DEFAULT_PROBES:
@@ -67,7 +89,11 @@ def load(path: str | None = None) -> Config:
     if isinstance(prog, dict) and isinstance(prog.get("enabled"), bool):
         cfg.progress_enabled = prog["enabled"]
     if isinstance(prog, dict) and "interval_s" in prog:
-        cfg.progress_interval_s = float(prog["interval_s"])
+        cfg.progress_interval_s = _positive_interval(
+            prog["interval_s"],
+            cfg.progress_interval_s,
+            "progress.interval_s",
+        )
     panes = data.get("panes", {})
     cfg.allow = list(panes.get("allow", []))
     cfg.deny = list(panes.get("deny", []))
