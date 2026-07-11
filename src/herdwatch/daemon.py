@@ -857,12 +857,20 @@ class Daemon:
                             pass
                         registered = None
                         stream.close()
-                        connected_at = None
                         if self._stream is stream:
                             self._stream = None
                         if unexpected_close:
+                            disconnected_at = self._clock()
+                            was_stable = (
+                                connected_at is not None
+                                and disconnected_at - connected_at
+                                >= self._backoff_base
+                            )
+                            if processed_event or was_stable:
+                                backoff = self._backoff_base
                             sleep(backoff)
                             backoff = min(backoff * 2, self._backoff_max)
+                        connected_at = None
                         continue
 
                 if self._resync_due:
