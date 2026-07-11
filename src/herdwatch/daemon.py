@@ -567,9 +567,15 @@ class Daemon:
         rows are reconciled BEFORE the first sweep can release stale ids)."""
         for book in (self.managed, self._legacy_release):
             for pane_id in list(book):
-                if pane_id in records:
-                    continue
                 mp = book[pane_id]
+                current = records.get(pane_id)
+                reused_pane_id = (
+                    current is not None
+                    and bool(mp.terminal_id)
+                    and (current.get("terminal_id") or "") != mp.terminal_id
+                )
+                if current is not None and not reused_pane_id:
+                    continue
                 new_id = (
                     by_terminal.get(mp.terminal_id) if mp.terminal_id else None
                 )
@@ -611,6 +617,13 @@ class Daemon:
                 del book[pane_id]
                 if book is self.managed:
                     self._adopted.discard(pane_id)
+                    if reused_pane_id:
+                        log.warning(
+                            "dropped stale %s for reused pane id %s",
+                            mp.kind,
+                            pane_id,
+                        )
+                        continue
                     # best-effort cleanup; the pane is gone, drop regardless
                     if mp.kind in SEMANTIC_HOLD_KINDS:
                         self._client.release_agent(pane_id, SOURCE, mp.agent)

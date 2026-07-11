@@ -1759,6 +1759,57 @@ def test_resync_remaps_moved_pane_by_terminal_id():
     assert client.releases == []  # nothing dropped, nothing released
 
 
+def test_resync_drops_adopted_hold_when_pane_id_is_reused():
+    client = FakeClient(
+        [_agent(pane="w1:p1", status="idle", term="term-new")]
+    )
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+                "terminal_id": "term-old",
+            }
+        ]
+    )
+
+    d._resync()
+
+    assert d.managed == {}
+    assert d._registry["w1:p1"]["terminal_id"] == "term-new"
+    assert client.releases == []
+
+
+def test_resync_remaps_old_terminal_when_pane_id_is_reused():
+    client = FakeClient(
+        [
+            _agent(pane="w1:p1", status="idle", term="term-new"),
+            _agent(pane="w2:p1", status="idle", term="term-old"),
+        ]
+    )
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+                "terminal_id": "term-old",
+            }
+        ]
+    )
+
+    d._resync()
+
+    assert "w1:p1" not in d.managed
+    assert d.managed["w2:p1"].terminal_id == "term-old"
+    assert client.releases == []
+
+
 def test_resync_keeps_state_when_herdr_down():
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(
