@@ -132,8 +132,11 @@ class Daemon:
 
     # ---------- small helpers ----------
 
-    def _ttl_ms(self) -> int:
-        ttl = int(2 * self._reprobe * 1000)
+    def _ttl_ms(self, kind: str | None = None) -> int:
+        interval = self._reprobe
+        if kind == "progress":
+            interval = max(interval, self._progress_interval)
+        ttl = int(2 * interval * 1000)
         return max(TTL_MIN_MS, min(TTL_MAX_MS, ttl))
 
     def _eligible(self, pane_id: str) -> bool:
@@ -736,7 +739,7 @@ class Daemon:
             SOURCE,
             agent=agent,
             custom_status=label,
-            ttl_ms=self._ttl_ms(),
+            ttl_ms=self._ttl_ms(kind),
         ):
             self.managed[pane_id] = ManagedPane(
                 label,
@@ -1112,7 +1115,7 @@ class Daemon:
             if label:
                 stale = (
                     now - self._meta_asserted_at.get(pane_id, 0.0)
-                ) >= self._ttl_ms() / 2000.0
+                ) >= self._ttl_ms("progress") / 2000.0
                 if mp is None or mp.custom_status != label or stale:
                     self._assert_metadata(
                         pane_id,

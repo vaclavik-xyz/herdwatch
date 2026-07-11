@@ -791,6 +791,23 @@ def test_progress_uses_metadata_not_report_agent():
     assert d.managed["w1:p1"].kind == "progress"
 
 
+def test_progress_metadata_ttl_covers_slow_progress_interval():
+    client = FakeClient([_claude_agent()])
+    d = make_daemon(
+        client,
+        reprobe_interval_s=15.0,
+        progress_interval_s=60.0,
+        progress=lambda sid: "2/5 Slow step",
+    )
+    seed(d, client)
+
+    d._progress_sweep()
+
+    assert client.metadata == [
+        ("w1:p1", "2/5 Slow step", False, 120_000)
+    ]
+
+
 def test_progress_writes_only_on_label_change_within_half_ttl():
     labels = iter(["2/5 Fixing auth", "2/5 Fixing auth", "3/5 Next step"])
     client = FakeClient([_claude_agent()])
@@ -817,6 +834,29 @@ def test_progress_refreshes_after_half_ttl():
     d._progress_sweep()
     assert len(client.metadata) == 2
     assert client.reports == []
+
+
+def test_slow_progress_refreshes_at_half_its_own_ttl():
+    now = [0.0]
+    client = FakeClient([_claude_agent()])
+    d = make_daemon(
+        client,
+        clock=lambda: now[0],
+        reprobe_interval_s=15.0,
+        progress_interval_s=60.0,
+        progress=lambda sid: "2/5 Slow step",
+    )
+    seed(d, client)
+
+    d._progress_sweep()
+    now[0] = 59.0
+    d._progress_sweep()
+    assert len(client.metadata) == 1
+
+    now[0] = 60.0
+    d._progress_sweep()
+    assert len(client.metadata) == 2
+    assert all(metadata[3] == 120_000 for metadata in client.metadata)
 
 
 def test_progress_cleared_when_no_active_task():
