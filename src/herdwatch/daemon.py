@@ -344,6 +344,10 @@ class Daemon:
             if (
                 status == expected
                 and (data.get("custom_status") or "") == mp.custom_status
+                and (
+                    mp.kind != "hold-pending"
+                    or data.get("agent") == mp.agent
+                )
             ):
                 if mp.kind == "hold-pending":
                     mp.kind = "hold"

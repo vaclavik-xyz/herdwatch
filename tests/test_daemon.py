@@ -444,6 +444,26 @@ def test_unverified_report_is_confirmed_by_matching_status_event():
     assert d.managed["w1:p1"].kind == "hold"
 
 
+def test_unverified_report_ignores_matching_label_from_different_agent():
+    client = FakeClient([_agent(status="idle")], report_ok=None)
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d._reprobe_sweep()
+
+    d.dispatch_event(
+        _status_event(
+            status="working", custom="⏳ review", agent="codex"
+        )
+    )
+
+    assert d.managed["w1:p1"].kind == "hold-pending"
+    assert client.releases == []
+
+
 def test_shutdown_retains_unverified_hold_when_readback_is_unavailable():
     snapshots = []
     client = FakeClient([_agent(status="idle")], report_ok=None)
