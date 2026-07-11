@@ -1252,6 +1252,55 @@ def test_legacy_release_retried_until_confirmed():
     assert "w2:p1" not in d._legacy_release
 
 
+def test_legacy_cleanup_blocks_new_hold_until_release_is_confirmed():
+    legacy = _agent(status="working", term="term-w1:p1")
+    legacy["custom_status"] = "2/5 Old task"
+    client = FakeClient([legacy])
+    releases = {"count": 0}
+
+    def release(pane_id, source, agent):
+        client.releases.append(pane_id)
+        releases["count"] += 1
+        if releases["count"] == 1:
+            client.agents[pane_id].update(
+                agent_status="idle", custom_status=None
+            )
+            return "failed"  # server applied it, response was lost
+        return "ok"
+
+    client.release_agent = release
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("CI: ci", 20, "ci"))],
+        reprobe_interval_s=15,
+    )
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 Old task",
+                "kind": "progress",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
+    seed(d, client)
+
+    d._reprobe_sweep()
+    d.dispatch_event(_status_event(status="idle"))
+
+    assert set(d._legacy_release) == {"w1:p1"}
+    assert d.managed == {}
+    assert client.reports == []
+
+    d._reprobe_sweep()
+
+    assert d._legacy_release == {}
+    assert d.managed["w1:p1"].kind == "hold"
+    assert client.reports == [("w1:p1", "working", "⏳ CI: ci")]
+
+
 def test_legacy_cleanup_skips_entry_remapped_during_yield():
     client = FakeClient(
         [

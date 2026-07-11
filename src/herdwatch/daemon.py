@@ -1209,6 +1209,11 @@ class Daemon:
         """Make the per-pane decision from the current registry record."""
         if not self._eligible(pane_id):
             return False
+        if pane_id in self._legacy_release:
+            # Never overlap a new semantic assertion with an unconfirmed
+            # pre-migration cleanup for the same source and pane.
+            self._last_probe.pop(pane_id, None)
+            return False
         now = self._clock()
         last = self._last_probe.get(pane_id)
         if not force and last is not None and (now - last) < self._reprobe:
@@ -1411,6 +1416,7 @@ class Daemon:
             owner = self._foreign_session_owner(pane_id)
             if owner is not None:
                 del self._legacy_release[pane_id]
+                self._last_probe.pop(pane_id, None)
                 log.warning(
                     "dropping legacy cleanup %s without release; session "
                     "belongs to %s",
@@ -1424,6 +1430,10 @@ class Daemon:
             outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
             if outcome == "ok":
                 del self._legacy_release[pane_id]
+                self._last_probe.pop(pane_id, None)
+                # Refresh the post-release status so the registry phase later
+                # in this same sweep can immediately consider pending work.
+                self._readback_record(pane_id)
                 log.info("released legacy assertion on %s", pane_id)
             elif outcome == "gone":
                 self._schedule_resync(debounce=False)
