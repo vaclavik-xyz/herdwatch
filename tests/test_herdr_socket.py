@@ -154,6 +154,12 @@ def test_request_raises_unavailable_on_oversized_response(tmp_path):
         srv.close()
 
 
+def test_request_raises_unavailable_with_zero_timeout(server):
+    # Ensure socket is closed even with zero timeout
+    with pytest.raises(HerdrUnavailable):
+        request("ping", {}, socket_path=server.path, timeout_s=0.0)
+
+
 def test_request_raises_unavailable_on_slow_drip(tmp_path):
     # server that sends data very slowly (slowly drip attack):
     # each byte within timeout but unbounded total time

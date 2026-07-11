@@ -58,16 +58,16 @@ def request(method: str, params: dict, *, socket_path: str | None = None,
     path = socket_path or resolve_socket_path()
     deadline = time.monotonic() + timeout_s
 
-    try:
-        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise HerdrUnavailable("timeout before connect")
-        conn.settimeout(remaining)
-        conn.connect(path)
-    except OSError as exc:
-        raise HerdrUnavailable(str(exc)) from exc
-    try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HerdrUnavailable("timeout before connect")
+            conn.settimeout(remaining)
+            conn.connect(path)
+        except OSError as exc:
+            raise HerdrUnavailable(str(exc)) from exc
+
         payload = json.dumps({"id": "herdwatch", "method": method, "params": params})
         try:
             remaining = deadline - time.monotonic()
@@ -77,6 +77,7 @@ def request(method: str, params: dict, *, socket_path: str | None = None,
             conn.sendall(payload.encode() + b"\n")
         except OSError as exc:
             raise HerdrUnavailable(str(exc)) from exc
+
         buf = b""
         while b"\n" not in buf:
             remaining = deadline - time.monotonic()
@@ -92,6 +93,5 @@ def request(method: str, params: dict, *, socket_path: str | None = None,
             buf += chunk
             if len(buf) > _MAX_RESPONSE_SIZE:
                 raise HerdrUnavailable(f"response line exceeds {_MAX_RESPONSE_SIZE} bytes")
-    finally:
-        conn.close()
+
     return _parse_response(buf.split(b"\n", 1)[0])
