@@ -1775,12 +1775,18 @@ def test_resync_drops_adopted_hold_when_pane_id_is_reused():
             }
         ]
     )
+    d._session_cache["w1:p1"] = "session-old"
+    d._last_probe["w1:p1"] = 1.0
+    d._meta_asserted_at["w1:p1"] = 2.0
 
     d._resync()
 
     assert d.managed == {}
     assert d._registry["w1:p1"]["terminal_id"] == "term-new"
     assert client.releases == []
+    assert "w1:p1" not in d._session_cache
+    assert "w1:p1" not in d._last_probe
+    assert "w1:p1" not in d._meta_asserted_at
 
 
 def test_resync_remaps_old_terminal_when_pane_id_is_reused():
@@ -1807,6 +1813,50 @@ def test_resync_remaps_old_terminal_when_pane_id_is_reused():
 
     assert "w1:p1" not in d.managed
     assert d.managed["w2:p1"].terminal_id == "term-old"
+    assert client.releases == []
+
+
+def test_resync_atomically_swaps_two_tracked_pane_ids():
+    client = FakeClient(
+        [
+            _agent(pane="w1:p1", status="idle", term="term-b"),
+            _agent(pane="w2:p1", status="idle", term="term-a"),
+        ]
+    )
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ A",
+                "kind": "hold",
+                "terminal_id": "term-a",
+            },
+            {
+                "pane_id": "w2:p1",
+                "agent": "claude",
+                "status": "⏳ B",
+                "kind": "hold",
+                "terminal_id": "term-b",
+            },
+        ]
+    )
+    d._session_cache = {
+        "w1:p1": "session-a",
+        "w2:p1": "session-b",
+    }
+
+    d._resync()
+
+    assert d.managed["w1:p1"].custom_status == "⏳ B"
+    assert d.managed["w1:p1"].terminal_id == "term-b"
+    assert d.managed["w2:p1"].custom_status == "⏳ A"
+    assert d.managed["w2:p1"].terminal_id == "term-a"
+    assert d._session_cache == {
+        "w1:p1": "session-b",
+        "w2:p1": "session-a",
+    }
     assert client.releases == []
 
 

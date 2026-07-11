@@ -306,8 +306,6 @@ class Daemon:
             self._stream = stream
             self._registry = records
             self._subscribed_pane_ids = pane_ids
-            for record in records.values():
-                self._remember_record(record)
             by_terminal = {
                 record["terminal_id"]: pane_id
                 for pane_id, record in records.items()
@@ -315,6 +313,8 @@ class Daemon:
             }
             self._backfill_legacy_terminals(records)
             self._reconcile_books(records, by_terminal)
+            for record in records.values():
+                self._remember_record(record)
             for mapping in (
                 self._last_probe,
                 self._session_cache,
@@ -559,12 +559,90 @@ class Daemon:
             if not mp.terminal_id and pane_id in records:
                 mp.terminal_id = records[pane_id].get("terminal_id") or ""
 
+    def _apply_terminal_moves(self, by_terminal: dict[str, str]) -> None:
+        """Apply direct terminal-id remaps atomically, including swaps."""
+        books = (self.managed, self._legacy_release)
+        candidates: dict[tuple[int, str], str] = {}
+        for book_index, book in enumerate(books):
+            for pane_id, mp in book.items():
+                if not mp.terminal_id:
+                    continue
+                new_id = by_terminal.get(mp.terminal_id)
+                if new_id and new_id != pane_id:
+                    candidates[(book_index, pane_id)] = new_id
+        if not candidates:
+            return
+
+        target_counts: dict[str, int] = {}
+        for target in candidates.values():
+            target_counts[target] = target_counts.get(target, 0) + 1
+        safe = {
+            source
+            for source, target in candidates.items()
+            if target_counts[target] == 1
+        }
+        while True:
+            blocked = {
+                source
+                for source in safe
+                if any(
+                    (book_index, candidates[source]) not in safe
+                    for book_index, book in enumerate(books)
+                    if candidates[source] in book
+                )
+            }
+            if not blocked:
+                break
+            safe.difference_update(blocked)
+        if not safe:
+            return
+
+        rows = {
+            source: books[source[0]].pop(source[1]) for source in safe
+        }
+        public_moves = {
+            source[1]: candidates[source]
+            for source in safe
+        }
+        source_counts: dict[str, int] = {}
+        for _, pane_id in safe:
+            source_counts[pane_id] = source_counts.get(pane_id, 0) + 1
+        for mapping in (
+            self._last_probe,
+            self._session_cache,
+            self._meta_asserted_at,
+        ):
+            captured = {
+                old: mapping[old]
+                for old in public_moves
+                if source_counts[old] == 1 and old in mapping
+            }
+            for old in public_moves:
+                mapping.pop(old, None)
+            for old, value in captured.items():
+                mapping[public_moves[old]] = value
+
+        adopted = {
+            pane_id
+            for book_index, pane_id in safe
+            if book_index == 0 and pane_id in self._adopted
+        }
+        for _, pane_id in safe:
+            self._adopted.discard(pane_id)
+        for source, mp in rows.items():
+            target = candidates[source]
+            books[source[0]][target] = mp
+            if source[0] == 0 and source[1] in adopted:
+                self._adopted.add(target)
+            log.info("remapped %s -> %s by terminal id", source[1], target)
+
     def _reconcile_books(
         self, records: dict[str, dict], by_terminal: dict[str, str]
     ) -> None:
         """Move reconciliation + vanish handling for managed and legacy rows
         against snapshot truth. Shared by _resync and bootstrap (so adopted
         rows are reconciled BEFORE the first sweep can release stale ids)."""
+        self._apply_terminal_moves(by_terminal)
         for book in (self.managed, self._legacy_release):
             for pane_id in list(book):
                 mp = book[pane_id]
@@ -615,15 +693,23 @@ class Daemon:
                     self._remap(pane_id, new_id, records.get(new_id))
                     continue
                 del book[pane_id]
+                if reused_pane_id:
+                    for mapping in (
+                        self._last_probe,
+                        self._session_cache,
+                        self._meta_asserted_at,
+                    ):
+                        mapping.pop(pane_id, None)
+                    if book is self.managed:
+                        self._adopted.discard(pane_id)
+                    log.warning(
+                        "dropped stale %s for reused pane id %s",
+                        mp.kind,
+                        pane_id,
+                    )
+                    continue
                 if book is self.managed:
                     self._adopted.discard(pane_id)
-                    if reused_pane_id:
-                        log.warning(
-                            "dropped stale %s for reused pane id %s",
-                            mp.kind,
-                            pane_id,
-                        )
-                        continue
                     # best-effort cleanup; the pane is gone, drop regardless
                     if mp.kind in SEMANTIC_HOLD_KINDS:
                         self._client.release_agent(pane_id, SOURCE, mp.agent)
