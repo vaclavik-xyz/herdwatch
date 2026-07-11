@@ -65,9 +65,15 @@ def run_checks(*, which: Callable[[str], bool], run: Callable[[list[str]], tuple
     detail_sock = ""
     detail_ver = ""
     try:
-        snapshot()
+        result = snapshot()
         reachable = True
-        modern = True
+        if isinstance(result, dict) and isinstance(result.get("snapshot"), dict):
+            modern = True
+        else:
+            detail_ver = (
+                "session.snapshot returned an unusable payload "
+                "(missing snapshot object)"
+            )
     except HerdrApiError as exc:
         reachable = True
         if exc.code == "unknown_method":

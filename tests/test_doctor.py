@@ -33,7 +33,7 @@ def test_all_required_pass(tmp_path):
         run=_run_all_ok,
         list_procs=lambda: [".venv/bin/herdwatch daemon"],
         plist_path=str(plist),
-        snapshot=lambda: {"agents": []},
+        snapshot=lambda: {"type": "session_snapshot", "snapshot": {"agents": []}},
     )
     assert exit_code(checks) == 0
     by_name = {c.name: c for c in checks}
@@ -48,7 +48,7 @@ def test_missing_herdr_fails_required():
         run=lambda a: (1, ""),
         list_procs=lambda: [],
         plist_path="/nonexistent",
-        snapshot=lambda: {"agents": []},
+        snapshot=lambda: {"type": "session_snapshot", "snapshot": {"agents": []}},
     )
     assert exit_code(checks) == 1
     herdr = next(c for c in checks if c.name == "herdr on PATH")
@@ -65,7 +65,7 @@ def test_optional_missing_is_warn_not_fail():
         run=run,
         list_procs=lambda: [],
         plist_path="/nonexistent",
-        snapshot=lambda: {"agents": []},
+        snapshot=lambda: {"type": "session_snapshot", "snapshot": {"agents": []}},
     )
     assert exit_code(checks) == 0  # required (herdr) pass; gh/roborev optional
     gh = next(c for c in checks if c.name.startswith("gh"))
@@ -83,10 +83,20 @@ def test_to_json_shape():
 
 
 def test_doctor_socket_ok():
-    checks = run_checks(**_base_kwargs(), snapshot=lambda: {"agents": []})
+    checks = run_checks(
+        **_base_kwargs(),
+        snapshot=lambda: {"type": "session_snapshot", "snapshot": {"agents": []}},
+    )
     by = _by_name(checks)
     assert by["herdr socket reachable"].ok
     assert by["herdr >= 0.7.2 (session.snapshot)"].ok
+
+
+def test_doctor_rejects_unusable_snapshot_payload():
+    by = _by_name(run_checks(**_base_kwargs(), snapshot=lambda: {"agents": []}))
+    assert by["herdr socket reachable"].ok
+    assert not by["herdr >= 0.7.2 (session.snapshot)"].ok
+    assert "snapshot" in by["herdr >= 0.7.2 (session.snapshot)"].detail
 
 
 def test_doctor_socket_unreachable():
