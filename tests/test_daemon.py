@@ -249,6 +249,7 @@ def test_adopted_hold_with_foreign_session_drops_without_lifecycle_release():
                 "agent": "claude",
                 "status": "⏳ review",
                 "kind": "hold",
+                "terminal_id": "term-w1:p1",
             }
         ]
     )
@@ -789,7 +790,16 @@ def test_adopt_defaults_kind_to_hold():
 def test_adopted_pane_released_when_work_already_cleared():
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(client, [StaticProbe(None)], reprobe_interval_s=0)
-    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
     seed(d, client)
     d._reprobe_sweep()
     assert client.releases == ["w1:p1"]
@@ -803,7 +813,16 @@ def test_adopted_pane_kept_when_still_pending():
         [StaticProbe(Pending("review", 30, "roborev"))],
         reprobe_interval_s=0,
     )
-    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
     seed(d, client)
     d._reprobe_sweep()
     assert "w1:p1" in d.managed
@@ -817,7 +836,16 @@ def test_adopted_pending_pane_is_reasserted_once():
         [StaticProbe(Pending("review", 30, "roborev"))],
         reprobe_interval_s=0,
     )
-    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
     seed(d, client)
     d._reprobe_sweep()
     assert client.reports == [("w1:p1", "working", "⏳ review")]
@@ -1187,6 +1215,7 @@ def test_legacy_release_retried_until_confirmed():
                 "agent": "claude",
                 "status": "2/5 X",
                 "kind": "progress",
+                "terminal_id": "term-w2:p1",
             }
         ]
     )
@@ -1265,6 +1294,7 @@ def test_legacy_cleanup_drops_foreign_session_without_release():
                 "agent": "claude",
                 "status": "2/5 X",
                 "kind": "progress",
+                "terminal_id": "term-w1:p1",
             }
         ]
     )
@@ -1929,6 +1959,43 @@ def test_stale_pane_move_terminal_mismatch_defers_to_snapshot():
     assert d._resync_due is True
 
 
+def test_terminal_less_adopted_hold_ignores_unrelated_move():
+    reused = _agent(
+        pane="w1:p1", status="idle", agent="codex", term="term-reused"
+    )
+    client = FakeClient([reused])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+            }
+        ]
+    )
+    seed(d, client)
+    moved = _agent(
+        pane="w2:p9", status="idle", agent="codex", term="term-reused"
+    )
+
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "pane": moved,
+            },
+        }
+    )
+
+    assert set(d.managed) == {"w1:p1"}
+    assert set(d._registry) == {"w1:p1"}
+    assert d._resync_due is True
+
+
 def test_pane_moved_to_denied_pane_releases():
     client = FakeClient([_agent(status="idle")])
     probe = StaticProbe(Pending("review", 30, "roborev"))
@@ -2157,7 +2224,6 @@ def test_resync_releases_hold_remapped_to_denied_pane():
             }
         ]
     )
-
     d._resync()
 
     assert d.managed == {}
@@ -2306,7 +2372,9 @@ def test_resync_keeps_stream_when_pane_set_unchanged():
 
 
 def test_resync_backfills_legacy_terminal_id():
-    client = FakeClient([_agent(status="idle")], release_ok=False)
+    current = _agent(status="working")
+    current["custom_status"] = "2/5 X"
+    client = FakeClient([current], release_ok=False)
     d = make_daemon(client)
     d.adopt(
         [
@@ -2385,6 +2453,120 @@ def test_resync_salvages_adopted_hold_by_unique_label_match():
     assert "w2:p9" in d.managed and "w1:p1" not in d.managed
     assert "w2:p9" in d._adopted
     assert client.releases == []
+
+
+def test_resync_salvages_terminal_less_legacy_after_pane_id_reuse():
+    reused = _agent(pane="w1:p1", status="idle", agent="codex", term="term-new")
+    moved = _agent(pane="w2:p9", status="working", term="term-old")
+    moved["custom_status"] = "2/5 X"
+    client = FakeClient([reused, moved], release_ok=False)
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+            }
+        ]
+    )
+
+    d._resync()
+
+    assert set(d._legacy_release) == {"w2:p9"}
+    assert d._legacy_release["w2:p9"].terminal_id == "term-old"
+    assert client.releases == []
+
+
+def test_resync_salvages_terminal_less_hold_after_pane_id_reuse():
+    reused = _agent(pane="w1:p1", status="idle", agent="codex", term="term-new")
+    moved = _agent(pane="w2:p9", status="working", term="term-old")
+    moved["custom_status"] = "⏳ review"
+    client = FakeClient([reused, moved])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+            }
+        ]
+    )
+    d._last_probe = {"w1:p1": 1.0, "w2:p9": 2.0}
+    d._session_cache = {"w1:p1": "reused", "w2:p9": "stale-target"}
+    d._meta_asserted_at = {"w1:p1": 1.0, "w2:p9": 2.0}
+
+    d._resync()
+
+    assert set(d.managed) == {"w2:p9"}
+    assert d.managed["w2:p9"].terminal_id == "term-old"
+    assert d._adopted == {"w2:p9"}
+    assert d._last_probe == {}
+    assert d._session_cache == {}
+    assert d._meta_asserted_at == {}
+    assert client.releases == []
+
+
+def test_resync_preserves_ambiguous_terminal_less_hold():
+    reused = _agent(pane="w1:p1", status="idle", agent="codex", term="term-new")
+    moved_a = _agent(pane="w2:p1", status="working", term="term-a")
+    moved_a["custom_status"] = "⏳ review"
+    moved_b = _agent(pane="w3:p1", status="working", term="term-b")
+    moved_b["custom_status"] = "⏳ review"
+    client = FakeClient([reused, moved_a, moved_b])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+            }
+        ]
+    )
+
+    d._resync()
+    d._reprobe_sweep()
+
+    assert set(d.managed) == {"w1:p1"}
+    assert d._adopted == {"w1:p1"}
+    assert d.managed["w1:p1"].terminal_id == ""
+    assert client.releases == []
+    assert client.reports == []
+    assert client.metadata == []
+    assert d._resync_due is True
+
+
+def test_resync_preserves_ambiguous_terminal_less_legacy_cleanup():
+    reused = _agent(pane="w1:p1", status="idle", agent="codex", term="term-new")
+    moved_a = _agent(pane="w2:p1", status="working", term="term-a")
+    moved_a["custom_status"] = "2/5 X"
+    moved_b = _agent(pane="w3:p1", status="working", term="term-b")
+    moved_b["custom_status"] = "2/5 X"
+    client = FakeClient([reused, moved_a, moved_b])
+    d = make_daemon(client)
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "2/5 X",
+                "kind": "progress",
+            }
+        ]
+    )
+
+    d._resync()
+    d._reprobe_sweep()
+
+    assert set(d._legacy_release) == {"w1:p1"}
+    assert d._legacy_release["w1:p1"].terminal_id == ""
+    assert client.releases == []
+    assert d._resync_due is True
 
 
 def test_resync_drops_unmatchable_legacy_row():

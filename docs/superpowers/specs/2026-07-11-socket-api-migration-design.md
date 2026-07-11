@@ -191,35 +191,29 @@ Main loop (single thread):
    file (original kind) so a crash mid-retry re-adopts them. Legacy
    entries participate in move handling like managed panes: their
    `terminal_id` (absent from pre-migration state files) is backfilled
-   from the first successful snapshot that still contains the pane_id,
-   after which `pane.moved` and resync reconciliation remap them; an
+   only when the snapshot record at the stored pane_id still has the same
+   agent and custom-status label. After that identity check, `pane.moved`
+   and resync reconciliation remap them; an
    entry whose pane_id and `terminal_id` are both gone is dropped (the
    assertion died with the pane). Backfilled `terminal_id`s are persisted
    to the state file immediately (rows carry `terminal_id`, see below),
    so a crash after backfill keeps the mapping. For a row with **no**
-   `terminal_id` whose pane_id is missing from the first snapshot (pane
-   moved between the old daemon's crash and the new daemon's first
-   snapshot), attempt a **label-match salvage** before dropping: if
+   `terminal_id` whose pane_id is missing **or has been reused by a
+   non-matching record** (the pane moved between the old daemon's crash
+   and the new daemon's first snapshot), attempt a **label-match salvage**
+   before dropping: if
    exactly one snapshot record has the same `agent` and a `custom_status`
    equal to the row's stored label — and that pane is not already in
-   `managed` or the legacy set — remap the entry to that pane. Safety:
+   `managed` or the legacy set — remap the entry to that pane, bind its
+   `terminal_id`, and discard source/target probe and session caches. Safety:
    a mismatched target either carries no herdwatch assertion (release
    from our source is a no-op) or carries a herdwatch *orphan* (releasing
    it is also correct cleanup); a healthy tracked assertion can never be
-   hit because tracked panes are excluded from candidates. No match /
-   multiple matches → drop.
-
-   **Accepted residual risk (documented, not engineered around):** two or
-   more legacy rows with identical agent+label whose panes were all moved
-   during the old daemon's downtime produce ambiguous matches and are
-   dropped, leaving no-TTL assertions stuck under their new ids. herdr
-   exposes no assertion-ownership lookup, so no client-side scheme can
-   resolve this conclusively; retaining the rows would spin forever
-   against ids that answer `not_found`. It needs a triple coincidence on
-   a one-time migration path, is visually obvious (a pane stuck
-   `working <label>`), and has a manual remedy:
-   `herdr pane release-agent <pane> --source herdwatch --agent <agent>`
-   (or a herdr server restart). Finish with one full sweep.
+   hit because tracked panes are excluded from candidates. No match drops
+   the bookkeeping without releasing a reused id. Multiple matches are
+   fail-closed: retain the terminal-less row, and do not release or
+   reassert it during sweeps, shutdown, or move events until a later
+   snapshot resolves the ambiguity. Finish with one full sweep.
 2. **Wait:** `selectors` on the stream fd, timeout = time to the nearest
    deadline (per-pane reprobe, resync).
 3. **`agent_status_changed` event:** update registry; run the same per-pane
@@ -411,8 +405,9 @@ kinds stay in the state file so `herdwatch status` can show them.
   change, reconnect re-bootstrap, old-server retry loop, legacy
   `terminal_id` backfill persisted and restored across restart, legacy
   row moved between failed and successful release attempts (event remap
-  and resync remap), label-match salvage (unique match remaps,
-  ambiguous/no match drops), `"hold"` row moved while the daemon was
+  and resync remap), label-match salvage after a missing or reused pane id
+  (unique match remaps and clears identity caches, ambiguity retains
+  without release, no match drops), `"hold"` row moved while the daemon was
   down remapped via persisted `terminal_id` on first resync, retained-event
   replay coalescing, redundant detection suppression, and stale move replay
   rejection.

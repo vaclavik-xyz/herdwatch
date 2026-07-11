@@ -462,6 +462,17 @@ class Daemon:
         mp = self.managed.get(pane_id)
         if (
             mp is not None
+            and not mp.terminal_id
+            and mp.kind in SEMANTIC_HOLD_KINDS
+        ):
+            terminal_id = observed.get("terminal_id") or ""
+            if not terminal_id or not self._record_matches_hold(observed, mp):
+                self._last_probe.pop(pane_id, None)
+                self._schedule_resync(debounce=False)
+                return
+            mp.terminal_id = terminal_id
+        if (
+            mp is not None
             and mp.terminal_id
             and not self._record_matches_terminal(observed, mp)
         ):
@@ -524,6 +535,14 @@ class Daemon:
         old_record = self._registry.get(old)
         new_record = self._registry.get(new)
         tracked = self.managed.get(old) or self._legacy_release.get(old)
+        if tracked is not None and not tracked.terminal_id:
+            if (
+                not terminal_id
+                or not self._record_matches_label(pane, tracked)
+            ):
+                self._schedule_resync(debounce=False)
+                return
+            tracked.terminal_id = terminal_id
         if old_record is None:
             if (
                 terminal_id
@@ -554,7 +573,14 @@ class Daemon:
             self._stream = None
         self._schedule_resync(debounce=False)
 
-    def _remap(self, old: str, new: str, rec: dict | None) -> None:
+    def _remap(
+        self,
+        old: str,
+        new: str,
+        rec: dict | None,
+        *,
+        preserve_cache: bool = True,
+    ) -> None:
         """Follow herdr's pane-id change: the assertion lives on inside herdr,
         so bookkeeping must follow it -- releasing the old id would just
         `not_found` while a permanent `working ⏳` survived under the new one."""
@@ -569,7 +595,7 @@ class Daemon:
             missing = object()
             value = mapping.pop(old, missing)
             mapping.pop(new, None)
-            if value is not missing:
+            if preserve_cache and value is not missing:
                 mapping[new] = value
         if rec:
             # Prefer fresh move-event metadata over the remapped old cache.
@@ -593,8 +619,13 @@ class Daemon:
         """Legacy rows predate terminal_id persistence; grab it from the
         first snapshot that still shows the pane, so later moves remap."""
         for pane_id, mp in self._legacy_release.items():
-            if not mp.terminal_id and pane_id in records:
-                mp.terminal_id = records[pane_id].get("terminal_id") or ""
+            current = records.get(pane_id)
+            if (
+                not mp.terminal_id
+                and current is not None
+                and self._record_matches_label(current, mp)
+            ):
+                mp.terminal_id = current.get("terminal_id") or ""
 
     def _apply_terminal_moves(
         self,
@@ -703,27 +734,41 @@ class Daemon:
             for pane_id in list(book):
                 mp = book[pane_id]
                 current = records.get(pane_id)
+                recover_by_label = not mp.terminal_id and (
+                    book is self._legacy_release
+                    or (
+                        book is self.managed
+                        and pane_id in self._adopted
+                        and mp.kind in SEMANTIC_HOLD_KINDS
+                    )
+                )
+                current_matches_label = (
+                    current is not None
+                    and self._record_matches_label(current, mp)
+                )
+                if recover_by_label and current_matches_label:
+                    mp.terminal_id = current.get("terminal_id") or ""
+                    continue
                 reused_pane_id = (
                     current is not None
-                    and bool(mp.terminal_id)
-                    and (current.get("terminal_id") or "") != mp.terminal_id
+                    and (
+                        (
+                            bool(mp.terminal_id)
+                            and (current.get("terminal_id") or "")
+                            != mp.terminal_id
+                        )
+                        or (recover_by_label and not current_matches_label)
+                    )
                 )
                 if current is not None and not reused_pane_id:
                     continue
                 new_id = (
                     by_terminal.get(mp.terminal_id) if mp.terminal_id else None
                 )
+                label_remap = False
                 if (
                     new_id is None
-                    and not mp.terminal_id
-                    and (
-                        book is self._legacy_release
-                        or (
-                            book is self.managed
-                            and pane_id in self._adopted
-                            and mp.kind in SEMANTIC_HOLD_KINDS
-                        )
-                    )
+                    and recover_by_label
                 ):
                     # A pre-migration row can move before the first snapshot
                     # and has no terminal_id. Salvage legacy cleanup rows and
@@ -741,12 +786,28 @@ class Daemon:
                     ]
                     if len(matches) == 1:
                         new_id = matches[0]
+                        label_remap = True
+                    elif len(matches) > 1:
+                        log.warning(
+                            "preserving ambiguous terminal-less %s at %s",
+                            mp.kind,
+                            pane_id,
+                        )
+                        continue
                 if (
                     new_id
                     and new_id not in self.managed
                     and new_id not in self._legacy_release
                 ):
-                    self._remap(pane_id, new_id, records.get(new_id))
+                    target = records.get(new_id)
+                    if not mp.terminal_id and target is not None:
+                        mp.terminal_id = target.get("terminal_id") or ""
+                    self._remap(
+                        pane_id,
+                        new_id,
+                        records.get(new_id),
+                        preserve_cache=not label_remap,
+                    )
                     continue
                 del book[pane_id]
                 if reused_pane_id:
@@ -852,6 +913,13 @@ class Daemon:
         return None
 
     @staticmethod
+    def _record_matches_label(rec: dict, mp: ManagedPane) -> bool:
+        return (
+            (rec.get("agent") or "") == mp.agent
+            and (rec.get("custom_status") or "") == mp.custom_status
+        )
+
+    @staticmethod
     def _record_matches_hold(rec: dict, mp: ManagedPane) -> bool:
         return (
             rec.get("agent") == mp.agent
@@ -937,6 +1005,18 @@ class Daemon:
                 pane_id,
             )
             return False
+        if not mp.terminal_id:
+            terminal_id = observed.get("terminal_id") or ""
+            if not terminal_id or not self._record_matches_hold(observed, mp):
+                self._last_probe.pop(pane_id, None)
+                self._schedule_resync(debounce=False)
+                log.warning(
+                    "cannot establish hold %s terminal identity for cleanup; "
+                    "keeping it to retry",
+                    pane_id,
+                )
+                return False
+            mp.terminal_id = terminal_id
         if (
             require_terminal or bool(mp.terminal_id)
         ) and not self._record_matches_terminal(observed, mp):
@@ -1113,12 +1193,30 @@ class Daemon:
 
         if (
             mp is not None
-            and mp.terminal_id
-            and not self._record_matches_terminal(rec, mp)
+            and (
+                (
+                    mp.terminal_id
+                    and not self._record_matches_terminal(rec, mp)
+                )
+                or (
+                    not mp.terminal_id
+                    and mp.kind in SEMANTIC_HOLD_KINDS
+                    and (
+                        not (rec.get("terminal_id") or "")
+                        or not self._record_matches_hold(rec, mp)
+                    )
+                )
+            )
         ):
             self._last_probe.pop(pane_id, None)
             self._schedule_resync(debounce=False)
             return False
+        if (
+            mp is not None
+            and not mp.terminal_id
+            and mp.kind in SEMANTIC_HOLD_KINDS
+        ):
+            mp.terminal_id = rec.get("terminal_id") or ""
 
         status = rec.get("agent_status") or "unknown"
         if mp is not None and mp.kind == "hold-pending":
@@ -1245,6 +1343,22 @@ class Daemon:
                     self._publish()
                     return
                 continue
+            if not mp.terminal_id:
+                terminal_id = observed.get("terminal_id") or ""
+                if not terminal_id or not self._record_matches_label(
+                    observed, mp
+                ):
+                    self._schedule_resync(debounce=False)
+                    log.warning(
+                        "cannot establish legacy cleanup %s terminal identity; "
+                        "keeping it to retry",
+                        pane_id,
+                    )
+                    if not yield_now():
+                        self._publish()
+                        return
+                    continue
+                mp.terminal_id = terminal_id
             if mp.terminal_id and not self._record_matches_terminal(
                 observed, mp
             ):
