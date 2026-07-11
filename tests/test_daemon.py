@@ -2819,6 +2819,7 @@ def test_run_resets_backoff_when_stream_lived_past_base_interval():
 def test_run_resets_backoff_when_event_intentionally_replaces_stream():
     client = FakeClient([])
     snapshot_calls = {"n": 0}
+    stream_attempts = {"n": 0}
     old = _agent(status="working")
     moved = _agent(pane="w2:p9", status="working", term="term-w1:p1")
 
@@ -2829,6 +2830,9 @@ def test_run_resets_backoff_when_event_intentionally_replaces_stream():
         return {"agents": [dict(old)]}
 
     def factory(subs):
+        stream_attempts["n"] += 1
+        if stream_attempts["n"] > 5:
+            raise AssertionError("intentional replacement reconnect loop")
         stream = FakeStream(subs)
         stream.feed(
             {
