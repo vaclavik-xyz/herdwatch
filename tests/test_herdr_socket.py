@@ -21,10 +21,17 @@ class FakeServer:
     """Minimal herdr-like ndjson unix-socket server: one request per
     connection; `events.subscribe` connections stay open for push()."""
 
-    def __init__(self, sock_dir, responses=None, subscribe_error=None):
+    def __init__(
+        self,
+        sock_dir,
+        responses=None,
+        subscribe_error=None,
+        subscribe_ack=None,
+    ):
         self.path = str(sock_dir / "herdr.sock")
         self.responses = responses or {}
         self.subscribe_error = subscribe_error
+        self.subscribe_ack = subscribe_ack
         self.requests = []
         self.subscriptions = []
         self._sub_conns = []
@@ -64,7 +71,14 @@ class FakeServer:
                 # constructor on the ack, and may push()/inspect immediately
                 with self._lock:
                     self._sub_conns.append(conn)
-                ack = {"id": msg["id"], "result": {"type": "subscription_started"}}
+                if self.subscribe_ack is None:
+                    ack = {
+                        "id": msg["id"],
+                        "result": {"type": "subscription_started"},
+                    }
+                else:
+                    ack = dict(self.subscribe_ack)
+                    ack.setdefault("id", msg["id"])
                 conn.sendall(json.dumps(ack).encode() + b"\n")
                 continue
             reply = self.responses.get(msg["method"])
@@ -489,6 +503,27 @@ def test_event_stream_raises_unavailable_on_structurally_invalid_ack(sock_dir):
             EventStream([{"type": "pane.created"}], socket_path=path, ack_timeout_s=5.0)
     finally:
         srv.close()
+
+
+@pytest.mark.parametrize(
+    "ack",
+    [
+        {},
+        {"result": []},
+        {"result": {}},
+        {"result": {"type": "ok"}},
+    ],
+)
+def test_event_stream_rejects_invalid_success_ack_shapes(sock_dir, ack):
+    server = FakeServer(sock_dir, subscribe_ack=ack)
+    try:
+        with pytest.raises(HerdrUnavailable):
+            EventStream(
+                [{"type": "pane.created"}],
+                socket_path=server.path,
+            )
+    finally:
+        server.close()
 
 
 def test_event_stream_raises_unavailable_on_falsy_error_value(sock_dir):

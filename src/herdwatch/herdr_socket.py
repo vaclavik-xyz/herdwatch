@@ -159,6 +159,15 @@ class EventStream:
                 if not isinstance(err, dict):
                     raise HerdrUnavailable("subscribe ack error field must be an object")
                 raise HerdrApiError(err.get("code", "unknown"), err.get("message", ""))
+            result = msg.get("result")
+            if not isinstance(result, dict):
+                raise HerdrUnavailable(
+                    "subscribe ack result field must be an object"
+                )
+            if result.get("type") != "subscription_started":
+                raise HerdrUnavailable(
+                    "subscribe ack result type must be subscription_started"
+                )
         except HerdrApiError:
             self.close()
             raise
