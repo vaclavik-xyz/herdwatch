@@ -2878,7 +2878,7 @@ No new code — an end-to-end check on this machine (herdr 0.7.3 runs locally wi
 
 - Installed this branch into `.venv` and reinstalled launchd. All required and
   optional `herdwatch doctor --json` checks passed; the service was left
-  running as PID 19385.
+  running under launchd.
 - On scratch pane `wX:p1`, an unknown -> working -> idle transition acquired a
   semantic marker hold in 0.587 s. On real idle pane `wT:p1`, whose official
   `herdr:claude` session requires the metadata fallback on herdr 0.7.3, a 60 s
