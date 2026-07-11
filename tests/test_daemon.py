@@ -1428,7 +1428,7 @@ def test_bootstrap_closes_stream_when_second_snapshot_fails():
     assert stream.closed is True
 
 
-class Stop(Exception):
+class Stop(BaseException):
     pass
 
 
@@ -1461,7 +1461,7 @@ def test_run_loop_processes_idle_event_from_stream():
 
     d._clock = clock
     try:
-        d.run(sleep=_stop_sleep)
+        d.run(sleep=lambda delay: None)
     except Stop:
         pass
     assert ("w1:p1", "working", "⏳ review") in client.reports
@@ -1497,7 +1497,7 @@ def test_run_rebootstraps_after_stream_close():
 
     d._clock = clock
     try:
-        d.run(sleep=_stop_sleep)
+        d.run(sleep=lambda delay: None)
     except Stop:
         pass
     assert len(streams) >= 2
@@ -1572,14 +1572,42 @@ def test_run_caps_exponential_backoff_while_bootstrap_fails():
     assert delays == [0.25, 0.5, 1.0, 1.0, 1.0]
 
 
-def test_run_resets_backoff_after_successful_reconnect():
+def test_run_backs_off_when_streams_close_immediately():
+    client = FakeClient([_agent(status="idle")])
+    attempts = {"n": 0}
+
+    def factory(subs):
+        attempts["n"] += 1
+        if attempts["n"] == 4:
+            raise SystemExit(0)
+        stream = FakeStream(subs)
+        stream._w.close()
+        return stream
+
+    delays = []
+    d = make_daemon(
+        client,
+        [StaticProbe(None)],
+        stream_factory=factory,
+        backoff_base_s=0.25,
+        backoff_max_s=1.0,
+    )
+    try:
+        d.run(sleep=delays.append)
+    except SystemExit:
+        pass
+
+    assert delays == [0.25, 0.5, 1.0]
+
+
+def test_run_resets_backoff_after_reconnected_stream_is_healthy():
     client = FakeClient([])
     snapshot_calls = {"n": 0}
     streams = []
 
     def snapshot():
         snapshot_calls["n"] += 1
-        if snapshot_calls["n"] in (1, 4):
+        if snapshot_calls["n"] == 1:
             raise HerdrUnavailable("down")
         return {"agents": [_agent()]}
 
@@ -1596,14 +1624,15 @@ def test_run_resets_backoff_after_successful_reconnect():
         if len(delays) == 2:
             raise SystemExit(0)
 
-    closed = {"done": False}
+    ticks = {"n": 0}
 
     def clock():
-        if streams and not closed["done"]:
-            closed["done"] = True
+        ticks["n"] += 1
+        if streams and ticks["n"] == 3:
             streams[0].feed({"event": "noop", "data": {}})
+        if streams and ticks["n"] == 6:
             streams[0]._w.close()
-        return 0.0
+        return float(ticks["n"]) * 0.001
 
     d = make_daemon(
         client,

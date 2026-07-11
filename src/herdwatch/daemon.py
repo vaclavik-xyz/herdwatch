@@ -807,6 +807,7 @@ class Daemon:
         selector = selectors.DefaultSelector()
         backoff = self._backoff_base
         registered = None
+        connected_at = None
         next_reprobe = next_progress = self._clock()
         next_resync = self._clock() + self._resync_interval
         while True:
@@ -819,7 +820,6 @@ class Daemon:
                             pass
                         registered = None
                     if self.bootstrap():
-                        backoff = self._backoff_base
                         selector.register(self._stream, selectors.EVENT_READ)
                         registered = self._stream
                         self._last_probe.clear()
@@ -827,6 +827,7 @@ class Daemon:
                         self._reprobe_sweep()
                         self._progress_sweep()
                         now = self._clock()
+                        connected_at = now
                         next_reprobe = now + self._reprobe
                         next_progress = now + self._progress_interval
                         next_resync = now + self._resync_interval
@@ -841,19 +842,27 @@ class Daemon:
                     min(next_reprobe, next_progress, next_resync) - now,
                 )
                 ready = selector.select(timeout)
+                processed_event = False
                 if ready:
                     stream = self._stream
-                    for message in stream.read_events():
+                    messages = stream.read_events()
+                    processed_event = bool(messages)
+                    for message in messages:
                         self.dispatch_event(message)
                     if self._stream is not stream or stream.closed:
+                        unexpected_close = self._stream is stream and stream.closed
                         try:
                             selector.unregister(stream)
                         except (KeyError, ValueError):
                             pass
                         registered = None
                         stream.close()
+                        connected_at = None
                         if self._stream is stream:
                             self._stream = None
+                        if unexpected_close:
+                            sleep(backoff)
+                            backoff = min(backoff * 2, self._backoff_max)
                         continue
 
                 if self._resync_due:
@@ -871,6 +880,17 @@ class Daemon:
                 if now >= next_resync:
                     self._resync()
                     next_resync = now + self._resync_interval
+                # Merely accepting a subscription is not enough to reset the
+                # backoff: a restarting server can ack and immediately close.
+                # Require either a successfully processed event or a stream
+                # that has stayed up through at least one base-backoff period.
+                stream_is_healthy = self._stream is not None and not self._stream.closed
+                stable_for_base = (
+                    connected_at is not None
+                    and now - connected_at >= self._backoff_base
+                )
+                if stream_is_healthy and (processed_event or stable_for_base):
+                    backoff = self._backoff_base
             except SystemExit:
                 raise
             except Exception:
