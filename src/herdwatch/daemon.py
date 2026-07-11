@@ -124,6 +124,7 @@ class Daemon:
         # pane is working -- exactly when the progress path needs it. Cache it
         # from any record that carries it.
         self._session_cache: dict[str, str] = {}
+        self._record_terminal_ids: dict[str, str] = {}
         self._meta_asserted_at: dict[str, float] = {}
         self._adopted: set[str] = set()
         self._stream = None
@@ -169,12 +170,30 @@ class Daemon:
         return (self._clock() if now is None else now) >= self._resync_not_before
 
     def _remember_record(self, rec: dict) -> None:
+        pane_id = rec["pane_id"]
+        terminal_id = rec.get("terminal_id") or ""
+        previous_terminal_id = self._record_terminal_ids.get(pane_id)
+        if (
+            terminal_id
+            and previous_terminal_id
+            and terminal_id != previous_terminal_id
+        ):
+            for mapping in (
+                self._last_probe,
+                self._session_cache,
+                self._meta_asserted_at,
+            ):
+                mapping.pop(pane_id, None)
+        if terminal_id:
+            self._record_terminal_ids[pane_id] = terminal_id
         if rec.get("agent") != "claude":
-            self._session_cache.pop(rec["pane_id"], None)
+            self._session_cache.pop(pane_id, None)
             return
         session = (rec.get("agent_session") or {}).get("value")
-        if session:
-            self._session_cache[rec["pane_id"]] = session
+        if session and terminal_id:
+            self._session_cache[pane_id] = session
+        elif not terminal_id:
+            self._session_cache.pop(pane_id, None)
 
     def _terminal_id(self, pane_id: str) -> str:
         rec = self._registry.get(pane_id) or {}
@@ -345,6 +364,7 @@ class Daemon:
                 self._last_probe,
                 self._session_cache,
                 self._meta_asserted_at,
+                self._record_terminal_ids,
             ):
                 for pane_id in list(mapping):
                     if pane_id not in records:
@@ -613,6 +633,7 @@ class Daemon:
             self._last_probe,
             self._session_cache,
             self._meta_asserted_at,
+            self._record_terminal_ids,
         ):
             missing = object()
             value = mapping.pop(old, missing)
@@ -705,6 +726,7 @@ class Daemon:
             self._last_probe,
             self._session_cache,
             self._meta_asserted_at,
+            self._record_terminal_ids,
         ):
             captured = {
                 old: mapping[old]
@@ -837,6 +859,7 @@ class Daemon:
                         self._last_probe,
                         self._session_cache,
                         self._meta_asserted_at,
+                        self._record_terminal_ids,
                     ):
                         mapping.pop(pane_id, None)
                     if book is self.managed:
@@ -899,6 +922,7 @@ class Daemon:
             self._last_probe,
             self._session_cache,
             self._meta_asserted_at,
+            self._record_terminal_ids,
         ):
             for pane_id in list(mapping):
                 if pane_id not in records:

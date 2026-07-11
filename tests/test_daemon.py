@@ -1068,6 +1068,28 @@ def test_unknown_agent_invalidates_cached_progress_session():
     assert client.metadata == []
 
 
+def test_reused_unmanaged_pane_id_invalidates_per_pane_caches():
+    old = _claude_agent(status="idle", session="old-session")
+    old["terminal_id"] = "term-old"
+    client = FakeClient([old])
+    d = make_daemon(client, progress=lambda sid: "2/5 Stale task")
+    seed(d, client)
+    d._last_probe["w1:p1"] = 12.0
+    d._meta_asserted_at["w1:p1"] = 11.0
+    assert d._session_cache["w1:p1"] == "old-session"
+
+    new = _claude_agent(status="working", session=None)
+    new["terminal_id"] = "term-new"
+    client.set_agents([new])
+    seed(d, client)
+    d._progress_sweep()
+
+    assert "w1:p1" not in d._session_cache
+    assert "w1:p1" not in d._last_probe
+    assert "w1:p1" not in d._meta_asserted_at
+    assert client.metadata == []
+
+
 def test_done_metadata_set_failure_retries_next_sweep():
     client = FakeClient([_agent(status="done")], meta_ok=False)
     d = make_daemon(
