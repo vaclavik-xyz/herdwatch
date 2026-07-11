@@ -558,7 +558,7 @@ git commit -m "feat: add herdr event subscription stream"
   - `session_snapshot() -> dict` — **raises** `HerdrUnavailable` / `HerdrApiError` (caller distinguishes herdr-down from old-server)
   - `agent_get(pane_id: str) -> dict | None` — None on any failure
   - `report_agent(pane_id, source, agent, state, custom_status=None) -> bool`
-  - `release_agent(pane_id, source, agent) -> bool` — `not_found` counts as released (True)
+  - `release_agent(pane_id, source, agent) -> str` — `"ok"` (released), `"gone"` (structured `not_found`: the pane id no longer exists — the pane may have been **moved**, so the caller must reconcile before dropping bookkeeping), `"failed"` (transport/other error, retry)
   - `report_metadata(pane_id, source, *, agent=None, custom_status=None, clear_custom_status=False, ttl_ms=None) -> bool` — `not_found` counts as True only when clearing
   - `pane_process_info(pane_id) -> dict` — `{}` on failure
 - **Deleted:** `agent_list()`, `agent_explain()` (the progress path no longer masks state, so explain has no consumer).
@@ -630,13 +630,17 @@ def test_report_agent_omits_custom_status_when_none():
     assert "custom_status" not in req.calls[0][1]
 
 
-def test_release_agent_treats_not_found_as_released():
+def test_release_agent_returns_tristate():
+    # "gone" is NOT success: the pane id may have changed via a move while
+    # the assertion lives on -- the daemon reconciles before dropping state
     assert HerdrClient(request=FakeRequest({"pane.release_agent": {"type": "ok"}})) \
-        .release_agent("w1:p1", "herdwatch", "claude") is True
+        .release_agent("w1:p1", "herdwatch", "claude") == "ok"
     assert HerdrClient(request=FakeRequest({"pane.release_agent": HerdrApiError("not_found", "gone")})) \
-        .release_agent("w1:p1", "herdwatch", "claude") is True
+        .release_agent("w1:p1", "herdwatch", "claude") == "gone"
+    assert HerdrClient(request=FakeRequest({"pane.release_agent": HerdrApiError("invalid_params", "x")})) \
+        .release_agent("w1:p1", "herdwatch", "claude") == "failed"
     assert HerdrClient(request=FakeRequest({"pane.release_agent": HerdrUnavailable("down")})) \
-        .release_agent("w1:p1", "herdwatch", "claude") is False
+        .release_agent("w1:p1", "herdwatch", "claude") == "failed"
 
 
 def test_report_metadata_set_and_clear():
@@ -741,9 +745,21 @@ class HerdrClient:
             params["custom_status"] = custom_status
         return self._call_bool("pane.report_agent", params, not_found_ok=False)
 
-    def release_agent(self, pane_id: str, source: str, agent: str) -> bool:
+    def release_agent(self, pane_id: str, source: str, agent: str) -> str:
+        """Returns "ok", "gone" (pane id unknown to herdr -- possibly moved,
+        the caller must reconcile before dropping bookkeeping), or "failed"."""
         params = {"pane_id": pane_id, "source": source, "agent": agent}
-        return self._call_bool("pane.release_agent", params, not_found_ok=True)
+        try:
+            self._call("pane.release_agent", params)
+            return "ok"
+        except HerdrApiError as exc:
+            if exc.code == "not_found":
+                return "gone"
+            log.warning("herdr pane.release_agent failed: %s", exc)
+            return "failed"
+        except HerdrUnavailable as exc:
+            log.warning("herdr unavailable for pane.release_agent: %s", exc)
+            return "failed"
 
     def report_metadata(self, pane_id: str, source: str, *, agent: str | None = None,
                         custom_status: str | None = None,
@@ -775,7 +791,7 @@ Note: `agent.get` uses `{"target": pane_id}` (the agent CLI resolves targets; `a
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_herdr.py -q`
-Expected: 10 passed. Also run `python3 -m pytest tests/ -q` — the whole suite stays green at this point (`tests/test_daemon.py` uses its own FakeClient and `daemon.py` is untouched here); the daemon rewrite lands in Tasks 5–8.
+Expected: all pass. Also run `python3 -m pytest tests/ -q` — the whole suite stays green at this point (`tests/test_daemon.py` uses its own FakeClient and `daemon.py` is untouched here); the daemon rewrite lands in Tasks 5–8.
 
 - [ ] **Step 5: Commit**
 
@@ -917,7 +933,8 @@ class FakeClient:
         self.releases = []
         self.metadata = []          # (pane_id, custom_status, clear, ttl_ms)
         self._report_ok = report_ok
-        self._release_ok = release_ok
+        # tri-state like the real client: "ok" | "gone" | "failed"
+        self._release_result = "ok" if release_ok else "failed"
         self._meta_ok = meta_ok
         self.snapshot_error = None  # exception instance to raise from session_snapshot
 
@@ -939,7 +956,7 @@ class FakeClient:
 
     def release_agent(self, pane_id, source, agent):
         self.releases.append(pane_id)
-        return self._release_ok
+        return self._release_result
 
     def report_metadata(self, pane_id, source, *, agent=None, custom_status=None,
                         clear_custom_status=False, ttl_ms=None):
@@ -1164,9 +1181,39 @@ def test_legacy_release_retried_until_confirmed():
     d._reprobe_sweep()
     assert client.releases == ["w2:p1"]
     assert "w2:p1" in d._legacy_release          # failed -> retained
-    client._release_ok = True
+    client._release_result = "ok"
     d._reprobe_sweep()
     assert "w2:p1" not in d._legacy_release      # confirmed -> dropped
+
+
+def test_release_gone_keeps_entry_and_schedules_resync():
+    # a release racing a pane move answers not_found while the assertion
+    # survives under the new id: keep the bookkeeping, let resync remap it
+    client = FakeClient([_agent(status="idle")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=0)
+    seed(d, client)
+    d._reprobe_sweep()
+    probe.result = None
+    client._release_result = "gone"
+    d._reprobe_sweep()
+    assert "w1:p1" in d.managed                  # NOT dropped on "gone"
+    assert d._resync_due is True                 # reconciliation queued
+
+
+def test_shutdown_keeps_rows_for_failed_cleanup():
+    # a clean shutdown racing a herdr blip must leave the rows in the state
+    # file -- the next daemon adopts them; wiping them would orphan the
+    # assertion with nothing left to reconcile
+    snaps = []
+    client = FakeClient([_agent(status="idle")], release_ok=False)
+    d = make_daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
+                    reprobe_interval_s=0, on_snapshot=snaps.append)
+    seed(d, client)
+    d._reprobe_sweep()
+    d.shutdown()
+    assert "w1:p1" in d.managed                  # retained for adoption
+    assert snaps[-1] != []                       # state file still lists it
 
 
 def test_rows_include_terminal_id_and_meta_flag():
@@ -1193,7 +1240,7 @@ def test_shutdown_releases_holds_and_clears_metadata():
     assert d.managed == {}
 ```
 
-Additionally port these existing tests 1:1 with the mechanical rule above (same asserts, new entry points): `test_context_carries_worktree_heads_to_probes`, `test_ignores_working_pane_not_managed`, `test_releases_when_cleared`, `test_reasserts_only_on_label_change`, `test_raising_probe_does_not_crash_tick` (rename `_sweep`), `test_reprobe_throttle_skips_within_interval`, `test_managed_pane_released_when_cleared_even_if_status_working` (set registry status to "working" via `d._registry["w1:p1"]["agent_status"] = "working"` before the second sweep), `test_deny_skips_pane`, `test_allow_only_listed`, `test_unmanaged_idle_pane_is_throttled`, `test_failed_release_keeps_pane_for_retry` (vanish leg moves to Task 7's resync tests — here keep the pane present and only assert failed-release retention on work-cleared), `test_failed_report_does_not_record_managed`, `test_failed_report_is_not_throttled`, `test_failed_work_cleared_release_is_not_throttled`, `test_tick_snapshots_managed_rows` (assert the new row shape with `terminal_id`/`meta`), `test_tick_snapshots_empty_when_nothing_held`, `test_release_all_snapshots_empty` (`shutdown`), `test_raising_snapshot_does_not_crash_tick`, `test_adopt_ignores_rows_without_pane_id`, `test_adopt_defaults_kind_to_hold`, `test_adopted_pane_released_when_work_already_cleared`, `test_adopted_pane_kept_when_still_pending`, `test_adopted_pending_pane_is_reasserted_once`, `test_progress_uses_cached_session_when_working_omits_it` (idle leg via `_reprobe_sweep`, working leg via `_progress_sweep`), `test_progress_skipped_when_session_never_seen`, `test_progress_skips_non_claude_agents`, `test_progress_disabled_leaves_working_panes_alone`, `test_progress_reader_exception_is_contained` — **for every ported progress test, the assertion target changes from `client.reports` to `client.metadata`** (progress labels are metadata writes now; e.g. the cached-session test ends with `assert client.metadata == [("w1:p1", "2/5 c00b", False, 30000)]` and `assert client.reports == []`), `test_build_daemon_constructs` (moves to Task 9 — delete here, re-added there). Delete: `test_releases_assertion_when_pane_vanishes`, `test_session_cache_dropped_when_pane_vanishes`, `test_adopted_pane_gone_is_released_on_restart` (all re-created as resync tests in Task 7), `test_progress_released_when_detection_says_stopped`, `test_progress_hands_over_to_hold_in_same_tick`, `test_progress_released_when_blocked`, `test_progress_stop_falls_through_despite_stale_reprobe_timer` (re-created as event tests in Task 6), `test_progress_released_when_explain_fails` (behavior deleted). Also delete these — each is superseded by a new test defined above (old name → replacement): `test_does_not_hold_done_pane` → `test_done_pane_gets_metadata_not_hold` (done panes now DO get a metadata label; the old "leave done alone" behavior is intentionally gone), `test_holds_idle_pane_after_it_was_done` → `test_done_to_idle_hands_over_to_hold`, `test_adopt_seeds_managed_from_rows` and `test_adopt_preserves_progress_kind` → `test_adopt_hold_rows_and_legacy_rows`, `test_progress_asserts_label_for_working_claude_pane` → `test_progress_uses_metadata_not_report_agent`, `test_progress_reasserts_only_on_label_change` → `test_progress_writes_only_on_label_change_within_half_ttl`, `test_progress_released_when_no_active_task` → `test_progress_cleared_when_no_active_task`, `test_hold_pane_not_probed_by_progress_path` → `test_hold_pane_not_claimed_by_progress_sweep`, `test_release_all_releases_managed` → `test_shutdown_releases_holds_and_clears_metadata`. After the rewrite, `grep -n "explain\|tick()" tests/test_daemon.py` must return nothing.
+Additionally port these existing tests 1:1 with the mechanical rule above (same asserts, new entry points): `test_context_carries_worktree_heads_to_probes`, `test_ignores_working_pane_not_managed`, `test_releases_when_cleared`, `test_reasserts_only_on_label_change`, `test_raising_probe_does_not_crash_tick` (rename `_sweep`), `test_reprobe_throttle_skips_within_interval`, `test_managed_pane_released_when_cleared_even_if_status_working` (set registry status to "working" via `d._registry["w1:p1"]["agent_status"] = "working"` before the second sweep), `test_deny_skips_pane`, `test_allow_only_listed`, `test_unmanaged_idle_pane_is_throttled`, `test_failed_release_keeps_pane_for_retry` (vanish leg moves to Task 7's resync tests — here keep the pane present and only assert failed-release retention on work-cleared), `test_failed_report_does_not_record_managed`, `test_failed_report_is_not_throttled`, `test_failed_work_cleared_release_is_not_throttled`, `test_tick_snapshots_managed_rows` (assert the new row shape with `terminal_id`/`meta`), `test_tick_snapshots_empty_when_nothing_held`, `test_release_all_snapshots_empty` (`shutdown`), `test_raising_snapshot_does_not_crash_tick`, `test_adopt_ignores_rows_without_pane_id`, `test_adopt_defaults_kind_to_hold`, `test_adopted_pane_released_when_work_already_cleared`, `test_adopted_pane_kept_when_still_pending`, `test_adopted_pending_pane_is_reasserted_once`, `test_progress_uses_cached_session_when_working_omits_it` (idle leg via `_reprobe_sweep`, working leg via `_progress_sweep`), `test_progress_skipped_when_session_never_seen`, `test_progress_skips_non_claude_agents`, `test_progress_disabled_leaves_working_panes_alone`, `test_progress_reader_exception_is_contained` — **for every ported progress test, the primary assertion target changes from `client.reports` to `client.metadata`, and every one of them — positive and negative — additionally asserts `client.reports == []`** (this pins the regression where the progress path would wrongly fall back to semantic `report_agent`; e.g. the cached-session test ends with `assert client.metadata == [("w1:p1", "2/5 c00b", False, 30000)]` and `assert client.reports == []`; a negative test asserts both `client.metadata == []` and `client.reports == []`), `test_build_daemon_constructs` (moves to Task 9 — delete here, re-added there). Delete: `test_releases_assertion_when_pane_vanishes`, `test_session_cache_dropped_when_pane_vanishes`, `test_adopted_pane_gone_is_released_on_restart` (all re-created as resync tests in Task 7), `test_progress_released_when_detection_says_stopped`, `test_progress_hands_over_to_hold_in_same_tick`, `test_progress_released_when_blocked`, `test_progress_stop_falls_through_despite_stale_reprobe_timer` (re-created as event tests in Task 6), `test_progress_released_when_explain_fails` (behavior deleted). Also delete these — each is superseded by a new test defined above (old name → replacement): `test_does_not_hold_done_pane` → `test_done_pane_gets_metadata_not_hold` (done panes now DO get a metadata label; the old "leave done alone" behavior is intentionally gone), `test_holds_idle_pane_after_it_was_done` → `test_done_to_idle_hands_over_to_hold`, `test_adopt_seeds_managed_from_rows` and `test_adopt_preserves_progress_kind` → `test_adopt_hold_rows_and_legacy_rows`, `test_progress_asserts_label_for_working_claude_pane` → `test_progress_uses_metadata_not_report_agent`, `test_progress_reasserts_only_on_label_change` → `test_progress_writes_only_on_label_change_within_half_ttl`, `test_progress_released_when_no_active_task` → `test_progress_cleared_when_no_active_task`, `test_hold_pane_not_probed_by_progress_path` → `test_hold_pane_not_claimed_by_progress_sweep`, `test_release_all_releases_managed` → `test_shutdown_releases_holds_and_clears_metadata`. After the rewrite, `grep -n "explain\|tick()" tests/test_daemon.py` must return nothing.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1345,11 +1392,21 @@ class Daemon:
         mp = self.managed.get(pane_id)
         if mp is None:
             return True
-        if self._client.release_agent(pane_id, SOURCE, mp.agent):
+        outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
+        if outcome == "ok":
             del self.managed[pane_id]
             self._adopted.discard(pane_id)
             log.info("release %s (%s)", pane_id, reason)
             return True
+        if outcome == "gone":
+            # not_found can mean "moved": the assertion may live on under a
+            # new pane id. Keep the bookkeeping and let the next resync
+            # reconcile by terminal_id (remap) or confirm the pane is gone
+            # (drop). Dropping here would orphan a permanent `working ⏳`.
+            self._resync_due = True
+            log.info("release of %s answered not_found (%s); reconciling",
+                     pane_id, reason)
+            return False
         log.warning("release of %s failed (%s); keeping to retry", pane_id, reason)
         return False
 
@@ -1466,9 +1523,12 @@ class Daemon:
 
     def _reprobe_sweep(self) -> None:
         for pane_id, mp in list(self._legacy_release.items()):
-            if self._client.release_agent(pane_id, SOURCE, mp.agent):
+            outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
+            if outcome == "ok":
                 del self._legacy_release[pane_id]
                 log.info("released legacy assertion on %s", pane_id)
+            elif outcome == "gone":
+                self._resync_due = True  # possibly moved: reconcile first
         for pane_id in list(self.managed):
             mp = self.managed.get(pane_id)
             if mp is None:
@@ -1521,24 +1581,29 @@ class Daemon:
     # ---------- shutdown ----------
 
     def shutdown(self) -> None:
-        """Release every assertion herdwatch currently owns (clean exit)."""
+        """Release every assertion herdwatch currently owns (clean exit).
+        Rows whose cleanup did NOT succeed stay in the state file so the
+        next daemon adopts and reconciles them -- wiping them on a herdr
+        blip would orphan live assertions with no record left."""
         for pane_id, mp in list(self.managed.items()):
             try:
                 if mp.kind == "hold":
-                    self._client.release_agent(pane_id, SOURCE, mp.agent)
+                    if self._client.release_agent(pane_id, SOURCE, mp.agent) == "ok":
+                        del self.managed[pane_id]
                 else:
+                    # metadata self-expires via TTL; drop the row either way
                     self._client.report_metadata(pane_id, SOURCE, agent=mp.agent,
                                                  clear_custom_status=True)
+                    del self.managed[pane_id]
             except Exception:
                 log.warning("failed to clean %s on shutdown", pane_id, exc_info=True)
         for pane_id, mp in list(self._legacy_release.items()):
             try:
-                self._client.release_agent(pane_id, SOURCE, mp.agent)
+                if self._client.release_agent(pane_id, SOURCE, mp.agent) == "ok":
+                    del self._legacy_release[pane_id]
             except Exception:
                 log.warning("failed to release legacy %s on shutdown", pane_id,
                             exc_info=True)
-        self.managed.clear()
-        self._legacy_release.clear()
         self._publish()
 ```
 
@@ -2027,28 +2092,11 @@ Add to `Daemon` (imports at top of daemon.py: `from .herdr_socket import HerdrAp
             if not mp.terminal_id and pane_id in records:
                 mp.terminal_id = records[pane_id].get("terminal_id") or ""
 
-    def _resync(self) -> None:
-        """Snapshot is truth: reconcile managed/legacy/registry against it.
-        Never raises; herdr being down keeps all state for a later retry."""
-        self._resync_due = False
-        try:
-            snap = self._client.session_snapshot()
-        except HerdrApiError as exc:
-            log.error("herdwatch requires herdr >= 0.7.2 with session.snapshot "
-                      "(server said: %s)", exc)
-            return
-        except HerdrUnavailable as exc:
-            log.warning("resync skipped, herdr unreachable: %s", exc)
-            return
-        records = {a["pane_id"]: a for a in snap.get("agents", [])
-                   if a.get("pane_id")}
-        # captured BEFORE reconciliation: _remap mutates the registry, and a
-        # post-remap comparison would miss the pane-id change entirely
-        before_ids = set(self._registry)
-        by_terminal = {a["terminal_id"]: pid for pid, a in records.items()
-                       if a.get("terminal_id")}
-        self._backfill_legacy_terminals(records)
-        # managed + legacy: move reconciliation, then vanish handling
+    def _reconcile_books(self, records: dict[str, dict],
+                         by_terminal: dict[str, str]) -> None:
+        """Move reconciliation + vanish handling for managed and legacy rows
+        against snapshot truth. Shared by _resync and bootstrap (so adopted
+        rows are reconciled BEFORE the first sweep can release stale ids)."""
         for book in (self.managed, self._legacy_release):
             for pane_id in list(book):
                 if pane_id in records:
@@ -2084,6 +2132,29 @@ Add to `Daemon` (imports at top of daemon.py: `from .herdr_socket import HerdrAp
                         self._client.report_metadata(pane_id, SOURCE, agent=mp.agent,
                                                      clear_custom_status=True)
                     log.info("dropped vanished pane %s (%s)", pane_id, mp.kind)
+
+    def _resync(self) -> None:
+        """Snapshot is truth: reconcile managed/legacy/registry against it.
+        Never raises; herdr being down keeps all state for a later retry."""
+        self._resync_due = False
+        try:
+            snap = self._client.session_snapshot()
+        except HerdrApiError as exc:
+            log.error("herdwatch requires herdr >= 0.7.2 with session.snapshot "
+                      "(server said: %s)", exc)
+            return
+        except HerdrUnavailable as exc:
+            log.warning("resync skipped, herdr unreachable: %s", exc)
+            return
+        records = {a["pane_id"]: a for a in snap.get("agents", [])
+                   if a.get("pane_id")}
+        # captured BEFORE reconciliation: _remap mutates the registry, and a
+        # post-remap comparison would miss the pane-id change entirely
+        before_ids = set(self._registry)
+        by_terminal = {a["terminal_id"]: pid for pid, a in records.items()
+                       if a.get("terminal_id")}
+        self._backfill_legacy_terminals(records)
+        self._reconcile_books(records, by_terminal)
         pane_set_changed = set(records) != before_ids
         self._registry = records
         for rec in records.values():
@@ -2260,25 +2331,26 @@ def _stop_sleep(_):
     raise Stop()
 
 
-def test_run_loop_bootstraps_sweeps_and_drains_events():
-    # Smoke test of the whole loop: bootstrap succeeds, the post-bootstrap
-    # sweep asserts the hold, and the pre-fed event is drained without
-    # incident. (Event-path *behavior* is unit-tested in the Task 6 tests;
-    # here the hold may come from the sweep -- that is fine.)
+def test_run_loop_processes_idle_event_from_stream():
+    # The snapshot shows the pane WORKING, so neither bootstrap nor any
+    # sweep can assert the hold -- it can only come from the pushed idle
+    # event flowing through dispatch_event -> _probe_pane. Not vacuous.
     # NOTE: sel.select() sleeps REAL seconds while the clock is fake, so
     # every interval must be tiny or the test wall-blocks on the timeout.
-    client = FakeClient([_agent(status="idle")])
+    client = FakeClient([_agent(status="working")])
     probe = StaticProbe(Pending("review", 30, "roborev"))
     stream = FakeStream()
     d = make_daemon(client, [probe], stream_factory=lambda subs: stream,
-                    reprobe_interval_s=0.001, resync_interval_s=0.001,
-                    progress_interval_s=0.001)
-    stream.feed(_status_event(status="idle"))
+                    reprobe_interval_s=0.001, resync_interval_s=999.0,
+                    progress_interval_s=999.0)
     ticks = {"n": 0}
 
     def clock():
         ticks["n"] += 1
-        if ticks["n"] > 200:                  # end the loop via the handler
+        if ticks["n"] == 50:                  # mid-loop: the agent finishes
+            client.agents["w1:p1"]["agent_status"] = "idle"
+            stream.feed(_status_event(status="idle"))
+        if ticks["n"] > 400:                  # end the loop via the handler
             raise Stop()
         return float(ticks["n"]) * 0.001
 
@@ -2384,7 +2456,13 @@ Add to `Daemon` (imports at top: `import selectors`):
             self._registry = records
             for rec in records.values():
                 self._remember_record(rec)
+            # reconcile adopted/legacy rows against fresh truth BEFORE the
+            # first sweep -- otherwise the sweep releases stale pane ids
+            # that may in fact have been moved while we were down
+            by_terminal = {a["terminal_id"]: pid for pid, a in records.items()
+                           if a.get("terminal_id")}
             self._backfill_legacy_terminals(records)
+            self._reconcile_books(records, by_terminal)
             for d in (self._last_probe, self._session_cache,
                       self._meta_asserted_at):
                 for pane_id in list(d):
