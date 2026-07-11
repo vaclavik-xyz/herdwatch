@@ -294,6 +294,30 @@ def test_reasserts_only_on_label_change():
     assert client.reports[-1] == ("w1:p1", "working", "⏳ CI: ci")
 
 
+def test_uncertain_label_update_preserves_verified_hold_for_cleanup():
+    client = FakeClient([_agent(status="idle")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(client, [probe], reprobe_interval_s=0)
+    seed(d, client)
+    d._reprobe_sweep()
+    client.agents["w1:p1"].update(
+        agent_status="working", custom_status="⏳ review"
+    )
+
+    probe.result = Pending("CI: ci", 20, "ci")
+    client._report_ok = None
+    d._reprobe_sweep()
+
+    assert d.managed["w1:p1"].kind == "hold"
+    assert d.managed["w1:p1"].custom_status == "⏳ review"
+
+    probe.result = None
+    d._reprobe_sweep()
+
+    assert client.releases == ["w1:p1"]
+    assert "w1:p1" not in d.managed
+
+
 def test_raising_probe_does_not_crash_sweep():
     class Boom:
         name = "boom"

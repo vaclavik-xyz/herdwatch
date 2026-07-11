@@ -949,6 +949,7 @@ class Daemon:
             )
             self._assert_metadata(pane_id, agent, label, "idle-meta")
             return
+        previous = self.managed.get(pane_id)
         outcome = self._client.report_agent(
             pane_id, SOURCE, agent, "working", label
         )
@@ -962,14 +963,23 @@ class Daemon:
             self._adopted.discard(pane_id)
             log.info("hold %s -> %s (%s)", pane_id, label, agent)
         elif outcome is None:
-            self.managed[pane_id] = ManagedPane(
-                label,
-                agent,
-                kind="hold-pending",
-                terminal_id=self._terminal_id(pane_id),
-            )
             self._last_probe.pop(pane_id, None)
-            log.warning("hold %s is awaiting readback verification", pane_id)
+            if previous is not None and previous.kind == "hold":
+                log.warning(
+                    "hold update for %s is awaiting retry; preserving the "
+                    "last verified assertion",
+                    pane_id,
+                )
+            else:
+                self.managed[pane_id] = ManagedPane(
+                    label,
+                    agent,
+                    kind="hold-pending",
+                    terminal_id=self._terminal_id(pane_id),
+                )
+                log.warning(
+                    "hold %s is awaiting readback verification", pane_id
+                )
         else:
             # Do not record a failed write, and let the next sweep retry now.
             self._last_probe.pop(pane_id, None)
