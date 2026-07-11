@@ -56,26 +56,33 @@ def _parse_response(line: bytes) -> dict:
 def request(method: str, params: dict, *, socket_path: str | None = None,
             timeout_s: float = 10.0) -> dict:
     path = socket_path or resolve_socket_path()
-    deadline = time.time() + timeout_s
+    deadline = time.monotonic() + timeout_s
 
     try:
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        conn.settimeout(timeout_s)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise HerdrUnavailable("timeout before connect")
+        conn.settimeout(remaining)
         conn.connect(path)
     except OSError as exc:
         raise HerdrUnavailable(str(exc)) from exc
     try:
         payload = json.dumps({"id": "herdwatch", "method": method, "params": params})
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HerdrUnavailable("timeout before send")
+            conn.settimeout(remaining)
             conn.sendall(payload.encode() + b"\n")
         except OSError as exc:
             raise HerdrUnavailable(str(exc)) from exc
         buf = b""
         while b"\n" not in buf:
-            remaining = deadline - time.time()
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise HerdrUnavailable("timeout waiting for response")
-            conn.settimeout(min(remaining, timeout_s))
+            conn.settimeout(remaining)
             try:
                 chunk = conn.recv(_RECV_CHUNK)
             except OSError as exc:

@@ -129,7 +129,7 @@ def test_request_raises_unavailable_on_eof(tmp_path):
 
 
 def test_request_raises_unavailable_on_oversized_response(tmp_path):
-    # server that sends data without newline indefinitely
+    # server that sends data without newline exceeding the size limit
     path = str(tmp_path / "bloat.sock")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
@@ -137,15 +137,19 @@ def test_request_raises_unavailable_on_oversized_response(tmp_path):
 
     def send_oversized():
         conn, _ = srv.accept()
-        # Send data larger than the limit without newline
-        conn.sendall(b"x" * (1024 * 100))  # 100KB of data without newline
+        # Send data larger than the 1MB limit without newline
+        conn.sendall(b"x" * (1024 * 1024 + 1000))  # 1MB + 1000 bytes without newline
+        # Keep connection open to avoid EOF
+        import time
+        time.sleep(10)
         conn.close()
 
     t = threading.Thread(target=send_oversized, daemon=True)
     t.start()
     try:
-        with pytest.raises(HerdrUnavailable):
-            request("ping", {}, socket_path=path, timeout_s=1.0)
+        with pytest.raises(HerdrUnavailable) as exc:
+            request("ping", {}, socket_path=path, timeout_s=5.0)
+        assert "exceeds" in str(exc.value)
     finally:
         srv.close()
 
