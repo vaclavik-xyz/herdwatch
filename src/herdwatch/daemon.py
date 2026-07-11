@@ -173,11 +173,15 @@ class Daemon:
         pane_id = rec["pane_id"]
         terminal_id = rec.get("terminal_id") or ""
         previous_terminal_id = self._record_terminal_ids.get(pane_id)
-        if (
-            terminal_id
-            and previous_terminal_id
-            and terminal_id != previous_terminal_id
-        ):
+        if not terminal_id:
+            for mapping in (
+                self._last_probe,
+                self._session_cache,
+                self._meta_asserted_at,
+                self._record_terminal_ids,
+            ):
+                mapping.pop(pane_id, None)
+        elif previous_terminal_id and terminal_id != previous_terminal_id:
             for mapping in (
                 self._last_probe,
                 self._session_cache,
@@ -192,8 +196,6 @@ class Daemon:
         session = (rec.get("agent_session") or {}).get("value")
         if session and terminal_id:
             self._session_cache[pane_id] = session
-        elif not terminal_id:
-            self._session_cache.pop(pane_id, None)
 
     def _terminal_id(self, pane_id: str) -> str:
         rec = self._registry.get(pane_id) or {}
