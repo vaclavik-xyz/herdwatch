@@ -258,6 +258,27 @@ class Daemon:
             if isinstance(row, dict) and row.get("pane_id")
         }
 
+    @staticmethod
+    def _snapshot_agent_records(snapshot: dict) -> dict[str, dict]:
+        agents = snapshot.get("agents")
+        if not isinstance(agents, list):
+            raise HerdrUnavailable(
+                "session.snapshot agents field must be a list"
+            )
+        records = {}
+        for agent in agents:
+            if not isinstance(agent, dict):
+                raise HerdrUnavailable(
+                    "session.snapshot agent entries must be objects"
+                )
+            pane_id = agent.get("pane_id")
+            if not isinstance(pane_id, str) or not pane_id:
+                raise HerdrUnavailable(
+                    "session.snapshot agent pane_id must be a string"
+                )
+            records[pane_id] = agent
+        return records
+
     def bootstrap(self) -> bool:
         """Subscribe between two snapshots and seed the registry from truth."""
         if self._stream_factory is None:
@@ -291,15 +312,11 @@ class Daemon:
                 return False
             try:
                 snapshot = self._client.session_snapshot()
+                records = self._snapshot_agent_records(snapshot)
             except (HerdrApiError, HerdrUnavailable) as exc:
                 log.warning("bootstrap: post-subscribe snapshot failed: %s", exc)
                 stream.close()
                 return False
-            records = {
-                agent["pane_id"]: agent
-                for agent in snapshot.get("agents", [])
-                if agent.get("pane_id")
-            }
             if self._snapshot_pane_ids(snapshot) != pane_ids:
                 stream.close()
                 continue
@@ -748,6 +765,7 @@ class Daemon:
         self._resync_not_before = None
         try:
             snap = self._client.session_snapshot()
+            records = self._snapshot_agent_records(snap)
         except HerdrApiError as exc:
             log.error(
                 "herdwatch requires herdr >= 0.7.2 with session.snapshot "
@@ -759,11 +777,6 @@ class Daemon:
             log.warning("resync skipped, herdr unreachable: %s", exc)
             self._schedule_resync()
             return False
-        records = {
-            a["pane_id"]: a
-            for a in snap.get("agents", [])
-            if a.get("pane_id")
-        }
         subscribed_pane_ids = self._snapshot_pane_ids(snap)
         by_terminal = {
             a["terminal_id"]: pid

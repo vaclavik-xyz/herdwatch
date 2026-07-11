@@ -1922,6 +1922,18 @@ def test_resync_failure_retries_lifecycle_intent_after_debounce():
     assert d._resync_ready(10.25) is True
 
 
+def test_resync_keeps_state_and_retries_malformed_snapshot():
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(client)
+    seed(d, client)
+    client.session_snapshot = lambda: {"agents": "invalid"}
+
+    assert d._resync() is False
+
+    assert "w1:p1" in d._registry
+    assert d._resync_due is True
+
+
 def test_resync_logs_old_server_and_keeps_state(caplog):
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(
@@ -2254,6 +2266,23 @@ def test_bootstrap_closes_stream_when_second_snapshot_fails():
 
     assert d.bootstrap() is False
     assert stream.closed is True
+
+
+def test_bootstrap_closes_stream_when_snapshot_agents_are_malformed():
+    client = FakeClient([])
+    stream = FakeStream()
+    snapshots = iter(
+        [
+            {"agents": [], "panes": []},
+            {"agents": [None], "panes": []},
+        ]
+    )
+    client.session_snapshot = lambda: next(snapshots)
+    d = make_daemon(client, stream_factory=lambda subs: stream)
+
+    assert d.bootstrap() is False
+    assert stream.closed is True
+    assert d._stream is None
 
 
 class Stop(BaseException):
