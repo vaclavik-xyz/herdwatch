@@ -527,12 +527,16 @@ def test_progress_uses_metadata_not_report_agent():
 
 
 def test_progress_writes_only_on_label_change_within_half_ttl():
+    labels = iter(["2/5 Fixing auth", "2/5 Fixing auth", "3/5 Next step"])
     client = FakeClient([_claude_agent()])
-    d = make_daemon(client, progress=lambda sid: "2/5 Fixing auth")
+    d = make_daemon(client, progress=lambda sid: next(labels))
     seed(d, client)
     d._progress_sweep()
     d._progress_sweep()
     assert len(client.metadata) == 1
+    d._progress_sweep()
+    assert client.metadata[-1] == ("w1:p1", "3/5 Next step", False, 30000)
+    assert len(client.metadata) == 2
     assert client.reports == []
 
 
@@ -560,6 +564,41 @@ def test_progress_cleared_when_no_active_task():
     assert client.metadata[-1] == ("w1:p1", None, True, None)
     assert client.reports == []
     assert "w1:p1" not in d.managed
+
+
+def test_done_metadata_set_failure_retries_next_sweep():
+    client = FakeClient([_agent(status="done")], meta_ok=False)
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+    )
+    seed(d, client)
+
+    d._reprobe_sweep()
+    assert "w1:p1" not in d.managed
+    client._meta_ok = True
+    d._reprobe_sweep()
+
+    assert d.managed["w1:p1"].kind == "done"
+    assert len(client.metadata) == 2
+
+
+def test_done_metadata_clear_failure_keeps_state_for_retry():
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    client = FakeClient([_agent(status="done")])
+    d = make_daemon(client, [probe], reprobe_interval_s=0)
+    seed(d, client)
+    d._reprobe_sweep()
+    probe.result = None
+    client._meta_ok = False
+
+    d._reprobe_sweep()
+    assert "w1:p1" in d.managed
+    client._meta_ok = True
+    d._reprobe_sweep()
+
+    assert "w1:p1" not in d.managed
+    assert client.metadata[-1] == ("w1:p1", None, True, None)
 
 
 def test_progress_uses_cached_session_when_working_omits_it():
