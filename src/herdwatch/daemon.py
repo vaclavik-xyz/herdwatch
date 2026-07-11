@@ -631,6 +631,7 @@ class Daemon:
             return False
         except HerdrUnavailable as exc:
             log.warning("resync skipped, herdr unreachable: %s", exc)
+            self._schedule_resync()
             return False
         records = {
             a["pane_id"]: a

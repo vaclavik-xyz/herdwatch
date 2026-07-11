@@ -1727,6 +1727,21 @@ def test_resync_keeps_state_when_herdr_down():
     assert "w1:p1" in d._registry
 
 
+def test_resync_failure_retries_lifecycle_intent_after_debounce():
+    now = [10.0]
+    client = FakeClient([])
+    client.snapshot_error = HerdrUnavailable("temporary restart")
+    d = make_daemon(client, clock=lambda: now[0])
+    d._schedule_resync(debounce=False)
+
+    assert d._resync() is False
+
+    assert d._resync_due is True
+    assert d._resync_not_before == 10.25
+    assert d._resync_ready(10.24) is False
+    assert d._resync_ready(10.25) is True
+
+
 def test_resync_logs_old_server_and_keeps_state(caplog):
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(
