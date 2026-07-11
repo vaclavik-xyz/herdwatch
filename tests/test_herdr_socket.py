@@ -154,8 +154,8 @@ def test_request_raises_unavailable_on_oversized_response(tmp_path):
         srv.close()
 
 
-def test_request_closes_socket_even_on_connect_failure():
-    # Verify socket is properly closed even when connect fails immediately
+def test_request_closes_socket_with_zero_timeout():
+    # Verify socket is properly closed even when timeout_s=0 expires before connect
     from unittest.mock import patch, MagicMock
 
     with patch('herdwatch.herdr_socket.socket.socket') as mock_socket_class:
@@ -164,13 +164,19 @@ def test_request_closes_socket_even_on_connect_failure():
         mock_socket_class.return_value = mock_sock
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
         mock_sock.__exit__ = MagicMock(return_value=False)
-        mock_sock.connect.side_effect = OSError("Connection refused")
+        # With timeout_s=0.0, deadline check should fire before connect is called
+        mock_sock.connect.side_effect = Exception("Should not be called")
 
-        with pytest.raises(HerdrUnavailable):
-            request("ping", {}, socket_path="/nonexistent", timeout_s=10.0)
+        with pytest.raises(HerdrUnavailable) as exc:
+            request("ping", {}, socket_path="/any", timeout_s=0.0)
 
-        # Verify the socket's __exit__ (close) was called
+        # Verify:
+        # 1. The socket's __exit__ (close) was called despite early timeout
         mock_sock.__exit__.assert_called_once()
+        # 2. connect was never called (timeout caught it first)
+        mock_sock.connect.assert_not_called()
+        # 3. The error is about timeout, not the mocked connect exception
+        assert "timeout" in str(exc.value).lower()
 
 
 def test_request_raises_unavailable_on_slow_drip(tmp_path):
