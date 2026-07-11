@@ -1035,3 +1035,30 @@ def test_pane_moved_remaps_legacy_entry():
         }
     )
     assert "w2:p9" in d._legacy_release and "w1:p1" not in d._legacy_release
+
+
+def test_pane_moved_prefers_fresh_session_from_event():
+    old = _claude_agent(status="idle", session="old-session")
+    client = FakeClient([old])
+    d = make_daemon(client)
+    seed(d, client)
+    moved = _claude_agent(
+        pane="w2:p9", status="idle", session="fresh-session"
+    )
+    moved["terminal_id"] = "term-w1:p1"
+
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "previous_workspace_id": "w1",
+                "previous_tab_id": "w1:t1",
+                "pane": dict(moved),
+            },
+        }
+    )
+
+    assert "w1:p1" not in d._session_cache
+    assert d._session_cache["w2:p9"] == "fresh-session"

@@ -261,7 +261,6 @@ class Daemon:
         `not_found` while a permanent `working ⏳` survived under the new one."""
         if rec:
             self._registry[new] = rec
-            self._remember_record(rec)
         self._registry.pop(old, None)
         for mapping in (
             self._last_probe,
@@ -270,6 +269,9 @@ class Daemon:
         ):
             if old in mapping:
                 mapping[new] = mapping.pop(old)
+        if rec:
+            # Prefer fresh move-event metadata over the remapped old cache.
+            self._remember_record(rec)
         if old in self.managed:
             self.managed[new] = self.managed.pop(old)
         if old in self._adopted:
