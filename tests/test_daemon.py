@@ -119,6 +119,11 @@ def make_daemon(client, probes=(), **kw):
     return Daemon(client, list(probes), **kw)
 
 
+def test_daemon_defaults_runtime_clock_to_monotonic():
+    daemon = Daemon(FakeClient(), [])
+    assert daemon._clock is time.monotonic
+
+
 def seed(d, client):
     """Load the fake's agents into the registry (what bootstrap/resync do)."""
     d._registry = {pane: dict(agent) for pane, agent in client.agents.items()}

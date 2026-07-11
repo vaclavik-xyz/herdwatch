@@ -85,7 +85,7 @@ class Daemon:
         reprobe_interval_s: float = 15.0,
         resync_interval_s: float = 60.0,
         progress_interval_s: float = 4.0,
-        clock: Callable[[], float] = time.time,
+        clock: Callable[[], float] = time.monotonic,
         enrich: Callable[[str], gitctx.GitInfo] = gitctx.enrich,
         allow: list[str] | None = None,
         deny: list[str] | None = None,
