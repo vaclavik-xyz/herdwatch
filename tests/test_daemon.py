@@ -344,6 +344,32 @@ def test_reprobe_sweep_yields_before_and_between_panes():
     ]
 
 
+def test_reprobe_sweep_stops_when_yield_reports_closed_stream():
+    client = FakeClient(
+        [_agent(pane="w1:p1", status="idle"), _agent(pane="w1:p2", status="idle")]
+    )
+    probed = []
+    yields = {"count": 0}
+
+    class Probe:
+        name = "ordered"
+
+        def check(self, ctx):
+            probed.append(ctx.pane_id)
+            return None
+
+    def yield_control():
+        yields["count"] += 1
+        return yields["count"] < 2
+
+    d = make_daemon(client, [Probe()], reprobe_interval_s=0)
+    seed(d, client)
+
+    d._reprobe_sweep(yield_control)
+
+    assert probed == ["w1:p1"]
+
+
 def test_allow_only_listed():
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(

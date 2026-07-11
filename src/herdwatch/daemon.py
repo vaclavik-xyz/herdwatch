@@ -960,10 +960,14 @@ class Daemon:
     # ---------- sweeps ----------
 
     def _reprobe_sweep(
-        self, yield_control: Callable[[], None] | None = None
+        self, yield_control: Callable[[], bool | None] | None = None
     ) -> None:
-        yield_now = yield_control or (lambda: None)
-        yield_now()
+        def yield_now() -> bool:
+            return yield_control is None or yield_control() is not False
+
+        if not yield_now():
+            self._publish()
+            return
         for pane_id, mp in list(self._legacy_release.items()):
             owner = self._foreign_session_owner(pane_id)
             if owner is not None:
@@ -974,7 +978,9 @@ class Daemon:
                     pane_id,
                     owner,
                 )
-                yield_now()
+                if not yield_now():
+                    self._publish()
+                    return
                 continue
             outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
             if outcome == "ok":
@@ -982,30 +988,42 @@ class Daemon:
                 log.info("released legacy assertion on %s", pane_id)
             elif outcome == "gone":
                 self._schedule_resync(debounce=False)
-            yield_now()
+            if not yield_now():
+                self._publish()
+                return
 
         for pane_id in list(self.managed):
             mp = self.managed.get(pane_id)
             if mp is None:
-                yield_now()
+                if not yield_now():
+                    self._publish()
+                    return
                 continue
             if not self._eligible(pane_id):
                 if mp.kind in SEMANTIC_HOLD_KINDS:
                     self._release_hold(pane_id, "pane no longer eligible")
                 else:
                     self._clear_metadata(pane_id, "pane no longer eligible")
-                yield_now()
+                if not yield_now():
+                    self._publish()
+                    return
                 continue
             self._probe_pane(pane_id)
-            yield_now()
+            if not yield_now():
+                self._publish()
+                return
 
         for pane_id, rec in list(self._registry.items()):
             if pane_id in self.managed or not self._eligible(pane_id):
-                yield_now()
+                if not yield_now():
+                    self._publish()
+                    return
                 continue
             if rec.get("agent_status") in ("idle", "done"):
                 self._probe_pane(pane_id)
-            yield_now()
+            if not yield_now():
+                self._publish()
+                return
         self._publish()
 
     def _progress_sweep(self) -> None:
@@ -1109,17 +1127,18 @@ class Daemon:
         next_reprobe = next_progress = self._clock()
         next_resync = self._clock() + self._resync_interval
 
-        def _drain_probe_events() -> None:
+        def _drain_probe_events() -> bool:
             """Keep the non-blocking status stream moving between probes."""
             nonlocal backoff
             stream = self._stream
             if stream is None or stream.closed:
-                return
+                return False
             messages = stream.read_events(max_chunks=1)
             if messages:
                 backoff = self._backoff_base
             for message in messages:
                 self.dispatch_event(message)
+            return self._stream is stream and not stream.closed
 
         while True:
             try:
