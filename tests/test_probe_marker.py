@@ -16,3 +16,6 @@ def test_marker_pending(tmp_path):
     store.add("w1:p1", "deploy")
     p = MarkerProbe(store).check(_ctx())
     assert p is not None and p.label == "deploy" and p.source == "marker" and p.priority == 40
+
+    direct = MarkerProbe(store).check_pane("w1:p1")
+    assert direct == p

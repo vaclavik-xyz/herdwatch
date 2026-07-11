@@ -1222,6 +1222,42 @@ def test_idle_edge_marker_skips_slower_probes():
     assert slow_calls == []
 
 
+def test_fast_marker_lookup_skips_git_enrichment():
+    client = FakeClient([_agent(status="idle")])
+    slow_calls = []
+
+    class Marker:
+        name = "marker"
+
+        def check_pane(self, pane_id):
+            return Pending("deploy", 40, "marker")
+
+        def check(self, ctx):
+            raise AssertionError("context path must not run")
+
+    class Slow:
+        name = "slow"
+
+        def check(self, ctx):
+            slow_calls.append(ctx.pane_id)
+            return None
+
+    d = make_daemon(
+        client,
+        [Marker(), Slow()],
+        reprobe_interval_s=0,
+        enrich=lambda cwd: (_ for _ in ()).throw(
+            AssertionError("git enrichment must not run")
+        ),
+    )
+    seed(d, client)
+
+    d._probe_pane("w1:p1", fast=True)
+
+    assert client.reports == [("w1:p1", "working", "⏳ deploy")]
+    assert slow_calls == []
+
+
 def test_stale_working_event_reprobes_current_idle_state():
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(
@@ -2101,6 +2137,73 @@ def test_run_drains_status_event_between_reprobe_panes():
     d = make_daemon(
         client,
         [Probe()],
+        stream_factory=lambda subs: stream,
+        reprobe_interval_s=999.0,
+        resync_interval_s=999.0,
+        progress_interval_s=999.0,
+    )
+
+    try:
+        d.run(sleep=_stop_sleep)
+    except Stop:
+        pass
+
+    assert client.reports == [("w1:p2", "working", "⏳ marker")]
+    assert "w1:p3" not in order
+
+
+def test_run_fast_probes_new_agent_discovered_between_panes():
+    order = []
+    stream = FakeStream()
+
+    class StopClient(FakeClient):
+        def report_agent(
+            self, pane_id, source, agent, state, custom_status=None
+        ):
+            super().report_agent(
+                pane_id, source, agent, state, custom_status
+            )
+            raise Stop()
+
+    client = StopClient(
+        [
+            _agent(pane="w1:p1", status="idle"),
+            _agent(pane="w1:p3", status="idle"),
+        ]
+    )
+
+    def snapshot():
+        return {
+            "agents": [dict(agent) for agent in client.agents.values()],
+            "panes": [
+                {"pane_id": "w1:p1"},
+                {"pane_id": "w1:p2"},
+                {"pane_id": "w1:p3"},
+            ],
+        }
+
+    client.session_snapshot = snapshot
+
+    class Marker:
+        name = "marker"
+
+        def check_pane(self, pane_id):
+            if pane_id == "w1:p2":
+                return Pending("marker", 40, "marker")
+            return None
+
+        def check(self, ctx):
+            order.append(ctx.pane_id)
+            if ctx.pane_id == "w1:p1":
+                client.agents["w1:p2"] = _agent(
+                    pane="w1:p2", status="idle"
+                )
+                stream.feed(_status_event(pane="w1:p2", status="idle"))
+            return None
+
+    d = make_daemon(
+        client,
+        [Marker()],
         stream_factory=lambda subs: stream,
         reprobe_interval_s=999.0,
         resync_interval_s=999.0,

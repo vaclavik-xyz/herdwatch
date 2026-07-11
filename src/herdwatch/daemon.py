@@ -17,7 +17,7 @@ from .config import Config
 from .herdr import HerdrClient
 from .herdr_socket import HerdrApiError, HerdrUnavailable
 from .markers import MarkerStore
-from .models import PaneContext
+from .models import PaneContext, Pending
 from .probes.bgjobs import BgJobsProbe
 from .probes.ci import CIProbe
 from .probes.marker import MarkerProbe
@@ -862,6 +862,25 @@ class Daemon:
                     break
         return aggregate(pendings)
 
+    def _fast_pending(self, pane_id: str) -> Pending | None:
+        """Return a probe's pane-only result without git enrichment."""
+        for probe in self._probes:
+            check_pane = getattr(probe, "check_pane", None)
+            if not callable(check_pane):
+                continue
+            try:
+                result = check_pane(pane_id)
+            except Exception:
+                log.warning(
+                    "fast probe %r raised; treating as not pending",
+                    getattr(probe, "name", probe),
+                    exc_info=True,
+                )
+                continue
+            if result:
+                return result
+        return None
+
     def _probe_pane(self, pane_id: str, *, fast: bool = False) -> None:
         """Make the per-pane decision from the current registry record."""
         if not self._eligible(pane_id):
@@ -905,10 +924,15 @@ class Daemon:
             else:
                 return
 
-        ctx = self._context(rec)
-        label = self._run_probes(ctx, fast=fast)
+        pending = self._fast_pending(pane_id) if fast else None
+        if pending is not None:
+            label = aggregate([pending])
+            agent_name = rec.get("agent") or "agent"
+        else:
+            ctx = self._context(rec)
+            label = self._run_probes(ctx, fast=fast)
+            agent_name = ctx.agent
         self._last_probe[pane_id] = now
-        agent_name = ctx.agent
 
         if mp is not None and mp.kind == "hold":
             if label:
@@ -1135,11 +1159,25 @@ class Daemon:
             stream = self._stream
             if stream is None or stream.closed:
                 return False
-            messages = stream.read_events(max_chunks=1)
+            before_ids = set(self._registry)
+            messages = stream.read_events()
             if messages:
                 backoff = self._backoff_base
             for message in messages:
                 self.dispatch_event(message)
+            if (
+                self._stream is stream
+                and not stream.closed
+                and self._resync_due
+                and self._resync_ready(self._clock())
+                and self._resync()
+            ):
+                discovered = set(self._registry) - before_ids
+                if self._stream is stream:
+                    for pane_id in sorted(discovered):
+                        rec = self._registry.get(pane_id) or {}
+                        if rec.get("agent_status") in ("idle", "done"):
+                            self._probe_pane(pane_id, fast=True)
             return self._stream is stream and not stream.closed
 
         while True:
@@ -1208,6 +1246,7 @@ class Daemon:
                                 stream.close()
                                 connected_at = None
                                 continue
+                        connected_at = self._clock()
                         self._reprobe_sweep(_drain_probe_events)
                         if self._stream is not stream or stream.closed:
                             unexpected_close = (
@@ -1222,6 +1261,12 @@ class Daemon:
                             if self._stream is stream:
                                 self._stream = None
                             if unexpected_close:
+                                if (
+                                    connected_at is not None
+                                    and self._clock() - connected_at
+                                    >= self._backoff_base
+                                ):
+                                    backoff = self._backoff_base
                                 sleep(backoff)
                                 backoff = min(
                                     backoff * 2, self._backoff_max
@@ -1230,7 +1275,6 @@ class Daemon:
                             continue
                         self._progress_sweep()
                         now = self._clock()
-                        connected_at = now
                         next_reprobe = now + self._reprobe
                         next_progress = now + self._progress_interval
                         next_resync = now + self._resync_interval
@@ -1277,6 +1321,12 @@ class Daemon:
                         if self._stream is stream:
                             self._stream = None
                         if unexpected_close:
+                            if (
+                                connected_at is not None
+                                and self._clock() - connected_at
+                                >= self._backoff_base
+                            ):
+                                backoff = self._backoff_base
                             sleep(backoff)
                             backoff = min(backoff * 2, self._backoff_max)
                         connected_at = None
