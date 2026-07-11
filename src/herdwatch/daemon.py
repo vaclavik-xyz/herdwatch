@@ -558,8 +558,11 @@ class Daemon:
             self._session_cache,
             self._meta_asserted_at,
         ):
-            if old in mapping:
-                mapping[new] = mapping.pop(old)
+            missing = object()
+            value = mapping.pop(old, missing)
+            mapping.pop(new, None)
+            if value is not missing:
+                mapping[new] = value
         if rec:
             # Prefer fresh move-event metadata over the remapped old cache.
             self._remember_record(rec)

@@ -1775,6 +1775,35 @@ def test_pane_moved_prefers_fresh_session_from_event():
     assert d._session_cache["w2:p9"] == "fresh-session"
 
 
+def test_pane_moved_clears_recycled_target_caches():
+    old = _agent(status="working", term="term-old")
+    stale_target = _claude_agent(
+        pane="w2:p9", status="idle", session="stale-session"
+    )
+    stale_target["terminal_id"] = "term-stale"
+    client = FakeClient([old, stale_target])
+    d = make_daemon(client)
+    seed(d, client)
+    d._last_probe = {"w1:p1": 12.0, "w2:p9": 99.0}
+    d._meta_asserted_at = {"w2:p9": 99.0}
+    moved = _agent(pane="w2:p9", status="working", term="term-old")
+
+    d.dispatch_event(
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "w1:p1",
+                "pane": moved,
+            },
+        }
+    )
+
+    assert d._last_probe == {"w2:p9": 12.0}
+    assert d._session_cache == {}
+    assert d._meta_asserted_at == {}
+
+
 def test_resync_releases_vanished_pane_and_drops_bookkeeping():
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(
