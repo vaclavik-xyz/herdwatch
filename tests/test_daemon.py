@@ -912,6 +912,24 @@ def test_progress_cleared_when_working_pane_changes_agent():
     assert "w1:p1" not in d._session_cache
 
 
+def test_unknown_agent_invalidates_cached_progress_session():
+    client = FakeClient([_claude_agent(status="idle")])
+    d = make_daemon(client, progress=lambda sid: "2/5 Stale task")
+    seed(d, client)
+    assert "w1:p1" in d._session_cache
+
+    unknown = _agent(status="working", agent=None)
+    client.set_agents([unknown])
+    seed(d, client)
+    assert "w1:p1" not in d._session_cache
+
+    client.set_agents([_claude_agent(status="working", session=None)])
+    seed(d, client)
+    d._progress_sweep()
+
+    assert client.metadata == []
+
+
 def test_done_metadata_set_failure_retries_next_sweep():
     client = FakeClient([_agent(status="done")], meta_ok=False)
     d = make_daemon(

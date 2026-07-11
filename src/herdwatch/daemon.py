@@ -169,8 +169,7 @@ class Daemon:
         return (self._clock() if now is None else now) >= self._resync_not_before
 
     def _remember_record(self, rec: dict) -> None:
-        agent = rec.get("agent")
-        if agent is not None and agent != "claude":
+        if rec.get("agent") != "claude":
             self._session_cache.pop(rec["pane_id"], None)
             return
         session = (rec.get("agent_session") or {}).get("value")
