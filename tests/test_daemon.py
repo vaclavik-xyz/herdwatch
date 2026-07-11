@@ -3840,6 +3840,57 @@ def test_run_caps_exponential_backoff_while_bootstrap_fails():
     assert delays == [0.25, 0.5, 1.0, 1.0, 1.0]
 
 
+def test_run_publishes_adopted_state_before_failed_bootstrap(monkeypatch):
+    client = FakeClient([])
+    order = []
+    monkeypatch.setattr("herdwatch.daemon.atexit.register", lambda fn: None)
+    monkeypatch.setattr(
+        "herdwatch.daemon.signal.signal", lambda signum, handler: None
+    )
+
+    def snapshot():
+        order.append("bootstrap")
+        raise HerdrUnavailable("down")
+
+    client.session_snapshot = snapshot
+    d = make_daemon(
+        client,
+        stream_factory=lambda subs: FakeStream(subs),
+        on_snapshot=lambda rows: order.append(("publish", rows)),
+    )
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
+
+    try:
+        d.run(sleep=lambda delay: (_ for _ in ()).throw(SystemExit(0)))
+    except SystemExit:
+        pass
+
+    assert order[0] == (
+        "publish",
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "kind": "hold",
+                "terminal_id": "term-w1:p1",
+                "meta": False,
+            }
+        ],
+    )
+    assert order[1] == "bootstrap"
+
+
 def test_run_backs_off_when_streams_close_immediately():
     client = FakeClient([_agent(status="idle")])
     attempts = {"n": 0}

@@ -1549,6 +1549,11 @@ class Daemon:
         except (ValueError, OSError):
             pass
 
+        # Claim the state file with this process before any socket backoff.
+        # Otherwise readers keep seeing the dead predecessor's PID while a
+        # live replacement is already retrying bootstrap.
+        self._publish()
+
         selector = selectors.DefaultSelector()
         backoff = self._backoff_base
         registered = None
