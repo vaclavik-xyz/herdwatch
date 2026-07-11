@@ -2298,6 +2298,18 @@ def test_bootstrap_old_server_logs_and_fails(caplog):
     assert any("0.7.2" in r.message for r in caplog.records)
 
 
+def test_bootstrap_reconciles_adopted_rows_before_first_sweep():
+    # a hold pane moved while the daemon was down: bootstrap must remap it
+    # via terminal_id BEFORE any sweep can release the obsolete id
+    client = FakeClient([_agent(pane="w2:p9", status="idle", term="t-old")])
+    d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
+    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review",
+              "kind": "hold", "terminal_id": "t-old"}])
+    assert d.bootstrap() is True
+    assert "w2:p9" in d.managed and "w1:p1" not in d.managed
+    assert client.releases == []             # nothing released blindly
+
+
 def test_bootstrap_logs_each_failure_reason_once(caplog):
     client = FakeClient([])
     client.snapshot_error = HerdrUnavailable("down")
@@ -2777,7 +2789,7 @@ def _snapshot() -> dict:
     return herdr_socket.request("session.snapshot", {})
 ```
 
-Extend the signature to `run_checks(*, which, run, list_procs, plist_path, snapshot)` — **required keyword, no default**, so no test can accidentally hit the live socket. Update the two existing tests in `tests/test_doctor.py` (`test_all_required_pass`, `test_optional_missing_is_warn_not_fail` — or whatever the current names are; both call `run_checks(...)`) to also pass `snapshot=lambda: {"agents": []}`. After the "herdr server running" check insert:
+Extend the signature to `run_checks(*, which, run, list_procs, plist_path, snapshot)` — **required keyword, no default**, so no test can accidentally hit the live socket. Update **every** existing `run_checks(...)` call in `tests/test_doctor.py` to also pass `snapshot=lambda: {"agents": []}` — run `grep -n "run_checks(" tests/test_doctor.py` first and cover all hits (currently three tests: `test_all_required_pass`, `test_missing_herdr_fails_required`, `test_optional_missing_is_warn_not_fail`; names may drift, the grep is authoritative). After the "herdr server running" check insert:
 
 ```python
     reachable = False
