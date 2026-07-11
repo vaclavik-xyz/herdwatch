@@ -932,7 +932,10 @@ class Daemon:
             ctx = self._context(rec)
             label = self._run_probes(ctx, fast=fast)
             agent_name = ctx.agent
-        self._last_probe[pane_id] = now
+        # Throttle from completion, not start. A slow external probe can take
+        # the whole interval; using its start time makes the same pane
+        # immediately due again before the event stream gets another read.
+        self._last_probe[pane_id] = self._clock()
 
         if mp is not None and mp.kind == "hold":
             if label:

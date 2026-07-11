@@ -2224,6 +2224,7 @@ def test_run_rechecks_managed_hold_when_probe_sweep_outlives_interval():
 
 def test_run_drains_stream_between_due_managed_reprobes():
     checks_since_read = {"value": 0, "max": 0}
+    now = {"value": 0.0}
 
     class TrackingStream(FakeStream):
         def read_events(self, *, max_chunks=None):
@@ -2234,6 +2235,7 @@ def test_run_drains_stream_between_due_managed_reprobes():
         name = "slow"
 
         def check(self, ctx):
+            now["value"] += 15.0
             checks_since_read["value"] += 1
             checks_since_read["max"] = max(
                 checks_since_read["max"], checks_since_read["value"]
@@ -2261,6 +2263,7 @@ def test_run_drains_stream_between_due_managed_reprobes():
         client,
         [SlowPending()],
         stream_factory=lambda subs: TrackingStream(subs),
+        clock=lambda: now["value"],
         reprobe_interval_s=15.0,
         resync_interval_s=999.0,
         progress_interval_s=999.0,
