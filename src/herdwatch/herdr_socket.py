@@ -172,12 +172,18 @@ class EventStream:
     def fileno(self) -> int:
         return self._sock.fileno()
 
-    def read_events(self) -> list[dict]:
+    def read_events(self, *, max_chunks: int | None = None) -> list[dict]:
         """Drain complete event lines without blocking. On EOF or a socket
-        error, parse what remains and set `closed`."""
+        error, parse what remains and set `closed`. ``max_chunks`` bounds
+        socket reads so callers with a deadline can regain control even while
+        a producer continuously fills the socket. Zero only parses buffered
+        complete lines."""
         events: list[dict] = []
+        chunks_read = 0
         if not self.closed:
             while True:
+                if max_chunks is not None and chunks_read >= max_chunks:
+                    break
                 try:
                     chunk = self._sock.recv(_RECV_CHUNK)
                 except (BlockingIOError, InterruptedError):
@@ -188,6 +194,7 @@ class EventStream:
                 if not chunk:
                     self.closed = True
                     break
+                chunks_read += 1
                 self._buf += chunk
                 # Continuously process complete lines to prevent buffer growth.
                 while b"\n" in self._buf:

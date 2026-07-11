@@ -334,6 +334,18 @@ def test_event_stream_buffers_partial_lines(server):
         stream.close()
 
 
+def test_event_stream_can_bound_reads_to_one_socket_chunk():
+    first = {"event": "first"}
+    second = {"event": "second"}
+    stream = _stream_with_chunks(
+        json.dumps(first).encode() + b"\n",
+        json.dumps(second).encode() + b"\n",
+    )
+
+    assert stream.read_events(max_chunks=1) == [first]
+    assert stream.read_events(max_chunks=1) == [second]
+
+
 def test_event_stream_sets_closed_on_eof(server):
     stream = EventStream([{"type": "pane.created"}], socket_path=server.path)
     try:

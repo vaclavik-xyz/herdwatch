@@ -309,7 +309,7 @@ class Daemon:
 
     def _drain_startup_replay(
         self, selector, stream
-    ) -> tuple[bool, int] | None:
+    ) -> tuple[str, int]:
         """Drain retained subscription events before running slow probes.
 
         Herdr 0.7.3 replays retained events to every new subscriber. Processing
@@ -317,31 +317,41 @@ class Daemon:
         socket while probes are running. Drain until the stream has been quiet,
         then let one authoritative snapshot reconcile all startup changes.
 
-        Return ``(enabled, event_count)``, or ``None`` if the stream closed.
+        Return ``(outcome, event_count)``. A timeout is not success: letting
+        stale events through after the authoritative snapshot could overwrite
+        current state, so the caller must reconnect instead.
         """
         quiet_s = max(0.0, self._startup_replay_quiet)
         max_s = max(0.0, self._startup_replay_max)
         if quiet_s == 0.0 or max_s == 0.0:
-            return None if stream.closed else (False, 0)
+            return ("closed" if stream.closed else "disabled"), 0
 
         started = self._clock()
         stop_at = started + max_s
-        quiet_until = min(started + quiet_s, stop_at)
-        drained = 0
+        quiet_until = started + quiet_s
+        buffered = stream.read_events(max_chunks=0)
+        if stream.closed:
+            return "closed", 0
+        drained = len(buffered)
+        if buffered:
+            quiet_until = self._clock() + quiet_s
         while True:
             now = self._clock()
+            if now >= stop_at:
+                return "timeout", drained
+            if now >= quiet_until:
+                return "quiet", drained
             deadline = min(quiet_until, stop_at)
-            if now >= deadline:
-                return True, drained
             ready = selector.select(max(0.0, deadline - now))
             if not ready:
-                return True, drained
-            messages = stream.read_events()
+                continue
+            messages = stream.read_events(max_chunks=1)
             if stream.closed:
-                return None
+                return "closed", drained
+            # Readability itself is replay activity, including a partial line.
+            quiet_until = self._clock() + quiet_s
             if messages:
                 drained += len(messages)
-                quiet_until = min(self._clock() + quiet_s, stop_at)
 
     # ---------- event dispatch ----------
 
@@ -1058,8 +1068,16 @@ class Daemon:
                         self._last_probe.clear()
                         self._resync_due = False
                         self._resync_not_before = None
-                        catchup = self._drain_startup_replay(selector, stream)
-                        if catchup is None:
+                        catchup_outcome, drained = self._drain_startup_replay(
+                            selector, stream
+                        )
+                        if catchup_outcome in ("closed", "timeout"):
+                            if catchup_outcome == "timeout":
+                                log.warning(
+                                    "startup replay did not become quiet after "
+                                    "%.1fs; reconnecting",
+                                    self._startup_replay_max,
+                                )
                             try:
                                 selector.unregister(stream)
                             except (KeyError, ValueError):
@@ -1071,12 +1089,11 @@ class Daemon:
                             sleep(backoff)
                             backoff = min(backoff * 2, self._backoff_max)
                             continue
-                        catchup_enabled, drained = catchup
                         if drained:
                             log.info(
                                 "drained %d retained startup events", drained
                             )
-                        if catchup_enabled:
+                        if catchup_outcome == "quiet":
                             if not self._resync():
                                 try:
                                     selector.unregister(stream)

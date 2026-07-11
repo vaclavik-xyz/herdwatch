@@ -1059,7 +1059,9 @@ class FakeStream:
     def fileno(self):
         return self._r.fileno()
 
-    def read_events(self):
+    def read_events(self, *, max_chunks=None):
+        if max_chunks == 0:
+            return []
         try:
             while True:
                 if not self._r.recv(4096):
@@ -1086,7 +1088,9 @@ class DripStream(FakeStream):
         super().__init__(subscriptions)
         self.read_count = 0
 
-    def read_events(self):
+    def read_events(self, *, max_chunks=None):
+        if max_chunks == 0:
+            return []
         try:
             byte = self._r.recv(1)
             if not byte:
@@ -1992,10 +1996,46 @@ def test_startup_replay_drain_stops_at_hard_max():
         selector.close()
         stream.close()
 
-    assert result is not None
-    enabled, drained = result
-    assert enabled is True
+    outcome, drained = result
+    assert outcome == "timeout"
     assert 0 < drained < 40
+
+
+def test_run_reconnects_without_probing_when_startup_replay_times_out():
+    client = FakeClient([_agent(status="working")])
+    streams = []
+
+    def factory(subs):
+        stream = DripStream(subs)
+        streams.append(stream)
+        for _ in range(40):
+            stream.feed(_status_event(status="idle"))
+        return stream
+
+    ticks = {"now": 0.0}
+
+    def clock():
+        ticks["now"] += 0.01
+        return ticks["now"]
+
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        stream_factory=factory,
+        clock=clock,
+        startup_replay_quiet_s=1.0,
+        startup_replay_max_s=0.05,
+    )
+
+    try:
+        d.run(sleep=_stop_sleep)
+    except Stop:
+        pass
+
+    assert len(streams) == 1
+    assert streams[0].closed is True
+    assert streams[0]._pending
+    assert client.reports == []
 
 
 def test_run_reconnects_when_startup_resync_fails():
