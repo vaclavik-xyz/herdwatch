@@ -2878,12 +2878,12 @@ No new code — an end-to-end check on this machine (herdr 0.7.3 runs locally wi
 
 - Installed this branch into `.venv` and reinstalled launchd. All required and
   optional `herdwatch doctor --json` checks passed; the service was left
-  running as PID 94792.
+  running as PID 19385.
 - On scratch pane `wX:p1`, an unknown -> working -> idle transition acquired a
-  marker hold in 0.587 s. A 5 s TTL marker was released 23.081 s after it was
-  added (the next sweep), leaving no managed row or label. Because the scratch
-  reporter was synthetic, releasing its assertion returned the pane to
-  `unknown`; a real integration would report its underlying idle state again.
+  semantic marker hold in 0.587 s. On real idle pane `wT:p1`, whose official
+  `herdr:claude` session requires the metadata fallback on herdr 0.7.3, a 60 s
+  TTL marker appeared in 1.471 s and cleared 10.808 s after expiry. The pane
+  stayed semantically `idle`, with no managed row or label left behind.
 - On unfocused scratch pane `wZ:p1`, pending work preserved semantic `done` and
   added `⏳ live done edge` in 0.758 s. Focusing the pane handed the display
   metadata over to a semantic `working ⏳` hold in 0.581 s.
