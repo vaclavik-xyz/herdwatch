@@ -2155,6 +2155,48 @@ def test_run_loop_processes_idle_event_from_stream():
     assert ("w1:p1", "working", "⏳ review") in client.reports
 
 
+def test_run_bounds_main_selector_event_read():
+    class BudgetStream(FakeStream):
+        def __init__(self):
+            super().__init__()
+            self.main_limit = "not-read"
+
+        def read_events(self, *, max_chunks=None):
+            had_pending = bool(self._pending)
+            events = super().read_events(max_chunks=max_chunks)
+            if had_pending:
+                self.main_limit = max_chunks
+                raise Stop()
+            return events
+
+    stream = BudgetStream()
+    fed = {"value": False}
+
+    def progress(session):
+        if not fed["value"]:
+            fed["value"] = True
+            stream.feed({"event": "noop", "data": {}})
+        return None
+
+    client = FakeClient([_claude_agent(status="working")])
+    d = make_daemon(
+        client,
+        [StaticProbe(None)],
+        stream_factory=lambda subs: stream,
+        progress=progress,
+        reprobe_interval_s=999.0,
+        resync_interval_s=999.0,
+        progress_interval_s=999.0,
+    )
+
+    try:
+        d.run(sleep=lambda delay: None)
+    except Stop:
+        pass
+
+    assert stream.main_limit == 1
+
+
 def test_run_drains_status_event_between_reprobe_panes():
     order = []
     stream = FakeStream()

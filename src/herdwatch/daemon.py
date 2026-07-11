@@ -1402,7 +1402,7 @@ class Daemon:
                 processed_event = False
                 if ready:
                     stream = self._stream
-                    messages = stream.read_events()
+                    messages = stream.read_events(max_chunks=1)
                     processed_event = bool(messages)
                     for message in messages:
                         self.dispatch_event(message)
