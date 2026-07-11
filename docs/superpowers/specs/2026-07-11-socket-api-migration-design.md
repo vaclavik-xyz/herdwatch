@@ -348,8 +348,10 @@ kinds stay in the state file so `herdwatch status` can show them.
 - `poll_interval_s` — no longer used; if present in config, log a one-line
   deprecation notice and ignore it. `reprobe_interval_s` unchanged.
 - `herdr-plugin.toml`: `min_herdr_version = "0.7.2"`.
-- `doctor` gains: socket path exists + connectable, `ping` round-trip,
-  server protocol ≥ 16 (via `session.snapshot` version metadata).
+- `doctor` gains two required checks driven by one `session.snapshot`
+  round-trip: "herdr socket reachable" (any response, even an error, proves
+  the socket) and "herdr ≥ 0.7.2" (the snapshot being accepted proves the
+  protocol floor — a separate `ping`/version read would be redundant).
 - README: rewrite "How it works" (event-driven, raw socket), drop v1
   limitations #1 and #2, soften #5 (progress labels no longer mask state;
   the ⏳ hold still does), note the herdr ≥ 0.7.2 requirement.

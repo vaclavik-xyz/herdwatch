@@ -12,7 +12,7 @@
 
 - Work on branch `feat/socket-api-migration` (create from `main` at start; plain merge or rebase at the end, NEVER squash).
 - Python stdlib only — no new runtime dependencies.
-- herdr server ≥ 0.7.2 (protocol 16) is required at runtime; no CLI-polling fallback. No `subprocess` calls to `herdr` may remain in `src/herdwatch/` after Task 9.
+- herdr server ≥ 0.7.2 (protocol 16) is required at runtime; no CLI-polling fallback. After Task 9 the daemon's herdr communication is socket-only — the sole remaining `herdr` subprocess in `src/herdwatch/` is doctor's `herdr status` CLI-presence check, which stays.
 - All herdr writes use `source = "herdwatch"` (existing `SOURCE` constant in `daemon.py`).
 - `custom_status` values must stay ≤ 32 chars (herdr caps them; existing `aggregate()`/`progress_label()` already comply — do not add new label sources).
 - `ttl_ms` sent to herdr must be clamped to `[1000, 86_400_000]`.
@@ -334,10 +334,12 @@ class FakeServer:
                     conn.close()
                     continue
                 self.subscriptions.append(msg["params"]["subscriptions"])
-                ack = {"id": msg["id"], "result": {"type": "subscription_started"}}
-                conn.sendall(json.dumps(ack).encode() + b"\n")
+                # register BEFORE the ack: the client returns from its
+                # constructor on the ack, and may push()/inspect immediately
                 with self._lock:
                     self._sub_conns.append(conn)
+                ack = {"id": msg["id"], "result": {"type": "subscription_started"}}
+                conn.sendall(json.dumps(ack).encode() + b"\n")
                 continue
             reply = self.responses.get(msg["method"])
             if reply is None:
@@ -773,7 +775,7 @@ Note: `agent.get` uses `{"target": pane_id}` (the agent CLI resolves targets; `a
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_herdr.py -q`
-Expected: 10 passed. Also run `python3 -m pytest tests/ -q` — `tests/test_daemon.py` will now FAIL (old FakeClient/tick API); that is expected and fixed in Tasks 5–8. Do not fix it here.
+Expected: 10 passed. Also run `python3 -m pytest tests/ -q` — the whole suite stays green at this point (`tests/test_daemon.py` uses its own FakeClient and `daemon.py` is untouched here); the daemon rewrite lands in Tasks 5–8.
 
 - [ ] **Step 5: Commit**
 
@@ -788,10 +790,12 @@ git commit -m "feat: rewrite HerdrClient over the raw socket API"
 
 **Files:**
 - Modify: `src/herdwatch/config.py`
-- Modify: `tests/test_config.py` (append)
+- Modify: `src/herdwatch/cli.py` (`_cmd_daemon`: drop the interval argument)
+- Modify: `src/herdwatch/daemon.py` (one line: default for the old `run()` param)
+- Modify: `tests/test_config.py` (append), `tests/test_cli.py` (FakeDaemon.run signature)
 
 **Interfaces:**
-- Produces (used by Tasks 9, 10): `Config.resync_interval_s: float = 60.0`, `Config.progress_interval_s: float = 4.0`. `Config.poll_interval_s` is **removed**; a `poll_interval_s` key in `[daemon]` only logs a deprecation warning.
+- Produces (used by Tasks 9, 10): `Config.resync_interval_s: float = 60.0`, `Config.progress_interval_s: float = 4.0`. `Config.poll_interval_s` is **removed**; a `poll_interval_s` key in `[daemon]` only logs a deprecation warning. `cli._cmd_daemon` calls `daemon.run()` with no arguments from here on.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -856,15 +860,20 @@ In `src/herdwatch/config.py`:
         cfg.progress_interval_s = float(prog["interval_s"])
 ```
 
+Removing the field breaks its consumers — fix them in the same commit:
+- `src/herdwatch/cli.py` `_cmd_daemon`: replace `daemon.run(cfg.poll_interval_s)` with `daemon.run()`.
+- `src/herdwatch/daemon.py`: give the old loop a default so the argless call works until the rewrite lands — `def run(self, poll_interval_s: float = 4.0, sleep: Callable[[float], None] = time.sleep) -> None:` (temporary; Tasks 5/8 replace `run` entirely).
+- `tests/test_cli.py`: the daemon-command test's fake daemon defines `def run(self, interval): ...` — change it to `def run(self, interval=None): ...` (it keeps passing in both worlds).
+
 - [ ] **Step 4: Run tests, expect existing + new to pass**
 
-Run: `python3 -m pytest tests/test_config.py -q`
-Expected: all pass. If an existing test asserts `poll_interval_s`, update it to assert the deprecation behavior instead (delete the assertion, keep the rest).
+Run: `python3 -m pytest tests/ -q`
+Expected: the whole suite passes. If an existing config test asserts `poll_interval_s`, update it to assert the deprecation behavior instead (delete the assertion, keep the rest).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/herdwatch/config.py tests/test_config.py
+git add src/herdwatch/config.py src/herdwatch/cli.py src/herdwatch/daemon.py tests/test_config.py tests/test_cli.py
 git commit -m "feat: add resync/progress intervals, deprecate poll_interval_s"
 ```
 
@@ -1019,11 +1028,15 @@ def test_done_metadata_cleared_when_work_clears():
 
 
 def test_done_metadata_refreshes_ttl_each_sweep():
+    # reprobe_interval_s must stay at the 15s default here: 0 would clamp
+    # the TTL to TTL_MIN_MS and the throttle is instead advanced via clock
+    now = [0.0]
     client = FakeClient([_agent(status="done")])
     d = make_daemon(client, [StaticProbe(Pending("review", 30, "roborev"))],
-                    reprobe_interval_s=0)
+                    clock=lambda: now[0])
     seed(d, client)
     d._reprobe_sweep()
+    now[0] = 16.0                # past the reprobe throttle
     d._reprobe_sweep()
     sets = [m for m in client.metadata if not m[2]]
     assert len(sets) == 2 and all(m[3] == 30000 for m in sets)  # refreshed
@@ -1180,7 +1193,7 @@ def test_shutdown_releases_holds_and_clears_metadata():
     assert d.managed == {}
 ```
 
-Additionally port these existing tests 1:1 with the mechanical rule above (same asserts, new entry points): `test_context_carries_worktree_heads_to_probes`, `test_ignores_working_pane_not_managed`, `test_holds_idle_pane_after_it_was_done` (done leg now asserts `client.metadata == []` because no pendings — use `StaticProbe(None)` for the done tick, then set the pending and go idle), `test_releases_when_cleared`, `test_reasserts_only_on_label_change`, `test_raising_probe_does_not_crash_tick` (rename `_sweep`), `test_reprobe_throttle_skips_within_interval`, `test_managed_pane_released_when_cleared_even_if_status_working` (set registry status to "working" via `d._registry["w1:p1"]["agent_status"] = "working"` before the second sweep), `test_deny_skips_pane`, `test_allow_only_listed`, `test_unmanaged_idle_pane_is_throttled`, `test_failed_release_keeps_pane_for_retry` (vanish leg moves to Task 7's resync tests — here keep the pane present and only assert failed-release retention on work-cleared), `test_failed_report_does_not_record_managed`, `test_failed_report_is_not_throttled`, `test_failed_work_cleared_release_is_not_throttled`, `test_tick_snapshots_managed_rows` (assert the new row shape with `terminal_id`/`meta`), `test_tick_snapshots_empty_when_nothing_held`, `test_release_all_snapshots_empty` (`shutdown`), `test_raising_snapshot_does_not_crash_tick`, `test_adopt_ignores_rows_without_pane_id`, `test_adopt_defaults_kind_to_hold`, `test_adopted_pane_released_when_work_already_cleared`, `test_adopted_pane_kept_when_still_pending`, `test_adopted_pending_pane_is_reasserted_once`, `test_progress_uses_cached_session_when_working_omits_it` (idle leg via `_reprobe_sweep`, working leg via `_progress_sweep`), `test_progress_skipped_when_session_never_seen`, `test_progress_skips_non_claude_agents`, `test_progress_disabled_leaves_working_panes_alone`, `test_progress_reader_exception_is_contained` — **for every ported progress test, the assertion target changes from `client.reports` to `client.metadata`** (progress labels are metadata writes now; e.g. the cached-session test ends with `assert client.metadata == [("w1:p1", "2/5 c00b", False, 30000)]` and `assert client.reports == []`), `test_build_daemon_constructs` (moves to Task 9 — delete here, re-added there). Delete: `test_releases_assertion_when_pane_vanishes`, `test_session_cache_dropped_when_pane_vanishes`, `test_adopted_pane_gone_is_released_on_restart` (all re-created as resync tests in Task 7), `test_progress_released_when_detection_says_stopped`, `test_progress_hands_over_to_hold_in_same_tick`, `test_progress_released_when_blocked`, `test_progress_stop_falls_through_despite_stale_reprobe_timer` (re-created as event tests in Task 6), `test_progress_released_when_explain_fails` (behavior deleted).
+Additionally port these existing tests 1:1 with the mechanical rule above (same asserts, new entry points): `test_context_carries_worktree_heads_to_probes`, `test_ignores_working_pane_not_managed`, `test_releases_when_cleared`, `test_reasserts_only_on_label_change`, `test_raising_probe_does_not_crash_tick` (rename `_sweep`), `test_reprobe_throttle_skips_within_interval`, `test_managed_pane_released_when_cleared_even_if_status_working` (set registry status to "working" via `d._registry["w1:p1"]["agent_status"] = "working"` before the second sweep), `test_deny_skips_pane`, `test_allow_only_listed`, `test_unmanaged_idle_pane_is_throttled`, `test_failed_release_keeps_pane_for_retry` (vanish leg moves to Task 7's resync tests — here keep the pane present and only assert failed-release retention on work-cleared), `test_failed_report_does_not_record_managed`, `test_failed_report_is_not_throttled`, `test_failed_work_cleared_release_is_not_throttled`, `test_tick_snapshots_managed_rows` (assert the new row shape with `terminal_id`/`meta`), `test_tick_snapshots_empty_when_nothing_held`, `test_release_all_snapshots_empty` (`shutdown`), `test_raising_snapshot_does_not_crash_tick`, `test_adopt_ignores_rows_without_pane_id`, `test_adopt_defaults_kind_to_hold`, `test_adopted_pane_released_when_work_already_cleared`, `test_adopted_pane_kept_when_still_pending`, `test_adopted_pending_pane_is_reasserted_once`, `test_progress_uses_cached_session_when_working_omits_it` (idle leg via `_reprobe_sweep`, working leg via `_progress_sweep`), `test_progress_skipped_when_session_never_seen`, `test_progress_skips_non_claude_agents`, `test_progress_disabled_leaves_working_panes_alone`, `test_progress_reader_exception_is_contained` — **for every ported progress test, the assertion target changes from `client.reports` to `client.metadata`** (progress labels are metadata writes now; e.g. the cached-session test ends with `assert client.metadata == [("w1:p1", "2/5 c00b", False, 30000)]` and `assert client.reports == []`), `test_build_daemon_constructs` (moves to Task 9 — delete here, re-added there). Delete: `test_releases_assertion_when_pane_vanishes`, `test_session_cache_dropped_when_pane_vanishes`, `test_adopted_pane_gone_is_released_on_restart` (all re-created as resync tests in Task 7), `test_progress_released_when_detection_says_stopped`, `test_progress_hands_over_to_hold_in_same_tick`, `test_progress_released_when_blocked`, `test_progress_stop_falls_through_despite_stale_reprobe_timer` (re-created as event tests in Task 6), `test_progress_released_when_explain_fails` (behavior deleted). Also delete these — each is superseded by a new test defined above (old name → replacement): `test_does_not_hold_done_pane` → `test_done_pane_gets_metadata_not_hold` (done panes now DO get a metadata label; the old "leave done alone" behavior is intentionally gone), `test_holds_idle_pane_after_it_was_done` → `test_done_to_idle_hands_over_to_hold`, `test_adopt_seeds_managed_from_rows` and `test_adopt_preserves_progress_kind` → `test_adopt_hold_rows_and_legacy_rows`, `test_progress_asserts_label_for_working_claude_pane` → `test_progress_uses_metadata_not_report_agent`, `test_progress_reasserts_only_on_label_change` → `test_progress_writes_only_on_label_change_within_half_ttl`, `test_progress_released_when_no_active_task` → `test_progress_cleared_when_no_active_task`, `test_hold_pane_not_probed_by_progress_path` → `test_hold_pane_not_claimed_by_progress_sweep`, `test_release_all_releases_managed` → `test_shutdown_releases_holds_and_clears_metadata`. After the rewrite, `grep -n "explain\|tick()" tests/test_daemon.py` must return nothing.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1246,6 +1259,7 @@ class Daemon:
         self._adopted: set[str] = set()
         self._stream = None
         self._resync_due = False
+        self._last_boot_error: str | None = None
 
     # ---------- small helpers ----------
 
@@ -1535,15 +1549,15 @@ Delete the old `tick()`, `_progress_tick()`, `_release()`, `release_all()` (supe
 Run: `python3 -m pytest tests/test_daemon.py -q`
 Expected: all pass.
 
-- [ ] **Step 5: Run the whole suite; fix only collateral imports**
+- [ ] **Step 5: Run the whole suite**
 
 Run: `python3 -m pytest tests/ -q`
-Expected: `test_cli.py` may fail on `run()`/`poll_interval_s` usage — patch `cli._cmd_daemon` minimally (`daemon.run()` without args) if needed to keep the suite green; final cli wiring is Task 9.
+Expected: all green (`cli.py` already calls `daemon.run()` argless since Task 4; the `run` stub is only hit by a real daemon launch, not by tests).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/herdwatch/daemon.py src/herdwatch/cli.py tests/test_daemon.py
+git add src/herdwatch/daemon.py tests/test_daemon.py
 git commit -m "feat: registry-driven per-pane engine with metadata labels and sweeps"
 ```
 
@@ -1569,6 +1583,18 @@ def _status_event(pane="w1:p1", status="idle", custom=None, agent="claude"):
             "data": {"pane_id": pane, "workspace_id": "w1",
                      "agent_status": status, "agent": agent,
                      "custom_status": custom}}
+
+
+class FakeStream:
+    """Minimal stand-in for herdr_socket.EventStream bookkeeping (Task 8
+    replaces it with a socketpair-backed version; the interface is a
+    superset of this one)."""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
 
 def test_idle_edge_event_probes_immediately():
@@ -1665,7 +1691,23 @@ def test_pane_moved_remaps_bookkeeping():
     assert d.managed["w2:p9"].kind == "hold"
     assert d.managed["w2:p9"].terminal_id == "term-w1:p1"
     assert "w2:p9" in d._registry and "w1:p1" not in d._registry
-    assert d._resync_due is True             # pane set changed -> resubscribe
+    assert d._resync_due is True
+
+
+def test_pane_moved_tears_down_stream_for_resubscribe():
+    # the old per-pane subscription is bound to the dead pane id; only a
+    # new stream (re-bootstrap) restores event coverage for the moved pane
+    client = FakeClient([_agent(status="idle")])
+    d = make_daemon(client)
+    seed(d, client)
+    stream = FakeStream()
+    d._stream = stream
+    moved = _agent(pane="w2:p9", status="idle", term="term-w1:p1")
+    d.dispatch_event({"event": "pane_moved",
+                      "data": {"type": "pane_moved", "previous_pane_id": "w1:p1",
+                               "previous_workspace_id": "w1", "previous_tab_id": "w1:t1",
+                               "pane": dict(moved)}})
+    assert stream.closed and d._stream is None
 
 
 def test_pane_moved_to_denied_pane_releases():
@@ -1775,7 +1817,15 @@ Add methods to `Daemon`:
             self._resync_due = True
             return
         self._remap(old, new, pane)
-        self._resync_due = True  # pane set changed: resubscribe via resync
+        # The per-pane agent_status_changed subscription is bound to the OLD
+        # public pane id and goes silent after a move (herdr matches events
+        # by pane_id). A later resync cannot notice — the registry is
+        # already remapped — so tear the stream down here; the run loop
+        # re-bootstraps and resubscribes with the new pane set.
+        if self._stream is not None:
+            self._stream.close()
+            self._stream = None
+        self._resync_due = True
 
     def _remap(self, old: str, new: str, rec: dict | None) -> None:
         """Follow herdr's pane-id change: the assertion lives on inside herdr,
@@ -1834,14 +1884,6 @@ Append to `tests/test_daemon.py`:
 
 ```python
 from herdwatch.herdr_socket import HerdrApiError, HerdrUnavailable
-
-
-class FakeStream:
-    def __init__(self):
-        self.closed = False
-
-    def close(self):
-        self.closed = True
 
 
 def test_resync_releases_vanished_pane_and_drops_bookkeeping():
@@ -1978,6 +2020,13 @@ Expected: FAIL — `AttributeError: '_resync'`
 Add to `Daemon` (imports at top of daemon.py: `from .herdr_socket import HerdrApiError, HerdrUnavailable`):
 
 ```python
+    def _backfill_legacy_terminals(self, records: dict[str, dict]) -> None:
+        """Legacy rows predate terminal_id persistence; grab it from the
+        first snapshot that still shows the pane, so later moves remap."""
+        for pane_id, mp in self._legacy_release.items():
+            if not mp.terminal_id and pane_id in records:
+                mp.terminal_id = records[pane_id].get("terminal_id") or ""
+
     def _resync(self) -> None:
         """Snapshot is truth: reconcile managed/legacy/registry against it.
         Never raises; herdr being down keeps all state for a later retry."""
@@ -1993,12 +2042,12 @@ Add to `Daemon` (imports at top of daemon.py: `from .herdr_socket import HerdrAp
             return
         records = {a["pane_id"]: a for a in snap.get("agents", [])
                    if a.get("pane_id")}
+        # captured BEFORE reconciliation: _remap mutates the registry, and a
+        # post-remap comparison would miss the pane-id change entirely
+        before_ids = set(self._registry)
         by_terminal = {a["terminal_id"]: pid for pid, a in records.items()
                        if a.get("terminal_id")}
-        # legacy rows: backfill terminal ids while the pane is still visible
-        for pane_id, mp in self._legacy_release.items():
-            if not mp.terminal_id and pane_id in records:
-                mp.terminal_id = records[pane_id].get("terminal_id") or ""
+        self._backfill_legacy_terminals(records)
         # managed + legacy: move reconciliation, then vanish handling
         for book in (self.managed, self._legacy_release):
             for pane_id in list(book):
@@ -2006,13 +2055,18 @@ Add to `Daemon` (imports at top of daemon.py: `from .herdr_socket import HerdrAp
                     continue
                 mp = book[pane_id]
                 new_id = by_terminal.get(mp.terminal_id) if mp.terminal_id else None
-                if new_id is None and not mp.terminal_id:
-                    # label-match salvage: a pre-first-snapshot move left us
-                    # with no terminal_id; a unique (agent, custom_status)
-                    # match is safe to adopt -- releasing a pane our source
-                    # never asserted is a no-op
+                if (new_id is None and not mp.terminal_id
+                        and book is self._legacy_release):
+                    # label-match salvage (legacy rows only): a move before
+                    # our first snapshot left no terminal_id; a unique
+                    # (agent, custom_status) match among untracked panes is
+                    # safe to adopt -- a mismatched target either has no
+                    # herdwatch assertion (release is a no-op) or carries a
+                    # herdwatch orphan (releasing it is also correct cleanup)
                     matches = [pid for pid, a in records.items()
-                               if (a.get("agent") or "") == mp.agent
+                               if pid not in self.managed
+                               and pid not in self._legacy_release
+                               and (a.get("agent") or "") == mp.agent
                                and (a.get("custom_status") or "") == mp.custom_status]
                     if len(matches) == 1:
                         new_id = matches[0]
@@ -2030,7 +2084,7 @@ Add to `Daemon` (imports at top of daemon.py: `from .herdr_socket import HerdrAp
                         self._client.report_metadata(pane_id, SOURCE, agent=mp.agent,
                                                      clear_custom_status=True)
                     log.info("dropped vanished pane %s (%s)", pane_id, mp.kind)
-        pane_set_changed = set(records) != set(self._registry)
+        pane_set_changed = set(records) != before_ids
         self._registry = records
         for rec in records.values():
             self._remember_record(rec)
@@ -2070,7 +2124,7 @@ git commit -m "feat: snapshot resync with terminal_id move reconciliation"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_daemon.py` (extend `FakeStream` in place — replace the Task 7 definition with this richer one; it stays compatible):
+Append to `tests/test_daemon.py` (extend `FakeStream` in place — replace the Task 6 definition with this richer one; it is a superset, all earlier call sites keep working):
 
 ```python
 import socket as _socket
@@ -2173,6 +2227,16 @@ def test_bootstrap_old_server_logs_and_fails(caplog):
     assert any("0.7.2" in r.message for r in caplog.records)
 
 
+def test_bootstrap_logs_each_failure_reason_once(caplog):
+    client = FakeClient([])
+    client.snapshot_error = HerdrUnavailable("down")
+    d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
+    with caplog.at_level("WARNING"):
+        assert d.bootstrap() is False
+        assert d.bootstrap() is False        # same reason again
+    assert sum("down" in r.message for r in caplog.records) == 1
+
+
 def test_bootstrap_subscribe_rejection_retries_with_fresh_set():
     client = FakeClient([_agent(status="idle")])
     attempts = {"n": 0}
@@ -2196,7 +2260,11 @@ def _stop_sleep(_):
     raise Stop()
 
 
-def test_run_processes_event_then_stops():
+def test_run_loop_bootstraps_sweeps_and_drains_events():
+    # Smoke test of the whole loop: bootstrap succeeds, the post-bootstrap
+    # sweep asserts the hold, and the pre-fed event is drained without
+    # incident. (Event-path *behavior* is unit-tested in the Task 6 tests;
+    # here the hold may come from the sweep -- that is fine.)
     # NOTE: sel.select() sleeps REAL seconds while the clock is fake, so
     # every interval must be tiny or the test wall-blocks on the timeout.
     client = FakeClient([_agent(status="idle")])
@@ -2283,11 +2351,12 @@ Add to `Daemon` (imports at top: `import selectors`):
             try:
                 snap_a = self._client.session_snapshot()
             except HerdrApiError as exc:
-                log.error("herdwatch requires herdr >= 0.7.2 with "
-                          "session.snapshot (server said: %s)", exc)
+                self._log_boot_failure(
+                    f"herdwatch requires herdr >= 0.7.2 with session.snapshot "
+                    f"(server said: {exc})", error=True)
                 return False
             except HerdrUnavailable as exc:
-                log.warning("bootstrap: herdr unreachable: %s", exc)
+                self._log_boot_failure(f"herdr unreachable: {exc}")
                 return False
             pane_ids = [a["pane_id"] for a in snap_a.get("agents", [])
                         if a.get("pane_id")]
@@ -2298,7 +2367,7 @@ Add to `Daemon` (imports at top: `import selectors`):
                          "snapshot", exc)
                 continue  # e.g. a pane closed between snapshot and subscribe
             except HerdrUnavailable as exc:
-                log.warning("bootstrap: subscribe failed: %s", exc)
+                self._log_boot_failure(f"subscribe failed: {exc}")
                 return False
             try:
                 snap_b = self._client.session_snapshot()
@@ -2315,14 +2384,26 @@ Add to `Daemon` (imports at top: `import selectors`):
             self._registry = records
             for rec in records.values():
                 self._remember_record(rec)
+            self._backfill_legacy_terminals(records)
             for d in (self._last_probe, self._session_cache,
                       self._meta_asserted_at):
                 for pane_id in list(d):
                     if pane_id not in records:
                         d.pop(pane_id, None)
+            self._last_boot_error = None
+            log.info("connected to herdr (%d panes)", len(records))
             return True
-        log.warning("bootstrap: pane set kept drifting; will retry")
+        self._log_boot_failure("pane set kept drifting; will retry")
         return False
+
+    def _log_boot_failure(self, reason: str, *, error: bool = False) -> None:
+        """Log once per DISTINCT failure reason: an old server must be
+        visible, a herdr that stays down through 30s-backoff retries must
+        not spam the log (herdeck connector pattern)."""
+        if reason == getattr(self, "_last_boot_error", None):
+            return
+        self._last_boot_error = reason
+        (log.error if error else log.warning)("bootstrap: %s", reason)
 
     def run(self, sleep: Callable[[float], None] = time.sleep) -> None:
         atexit.register(self.shutdown)
@@ -2372,16 +2453,20 @@ Add to `Daemon` (imports at top: `import selectors`):
                 timeout = max(0.0, min(next_reprobe, next_progress, next_resync) - now)
                 ready = sel.select(timeout)
                 if ready:
-                    for msg in self._stream.read_events():
+                    stream = self._stream
+                    for msg in stream.read_events():
                         self.dispatch_event(msg)
-                    if self._stream.closed:
+                    # dispatch may itself drop the stream (pane.moved needs a
+                    # resubscribe) -- compare identity, not just .closed
+                    if self._stream is not stream or stream.closed:
                         try:
-                            sel.unregister(registered)
+                            sel.unregister(stream)
                         except (KeyError, ValueError):
                             pass
                         registered = None
-                        self._stream.close()
-                        self._stream = None
+                        stream.close()
+                        if self._stream is stream:
+                            self._stream = None
                         continue
                 if self._resync_due:
                     self._resync()
@@ -2456,7 +2541,7 @@ def test_build_daemon_constructs_with_new_wiring():
 In `tests/test_cli.py`, update the daemon-invocation test (find the test that stubs `build_daemon`/`run`) so the fake daemon's `run` takes no positional interval: `def run(self): ...` — and assert it was called. Update the status test expectations to accept the `labeling`/`releasing` verbs:
 
 ```python
-def test_status_prints_done_and_legacy_verbs(monkeypatch, capsys):
+def test_status_prints_kind_verbs(monkeypatch, capsys):
     from herdwatch import cli as cli_mod
 
     class Snap:
@@ -2516,11 +2601,10 @@ def build_daemon(config: Config, client=None) -> Daemon:
                   stream_factory=lambda subs: herdr_socket.EventStream(subs))
 ```
 
-`cli.py` `_cmd_daemon`: replace `daemon.run(cfg.poll_interval_s)` with `daemon.run()`. `_cmd_status` verb mapping:
+`cli.py` `_cmd_daemon` already calls `daemon.run()` (Task 4). `_cmd_status` verb mapping (legacy rows publish their original kind, so no separate verb exists for them):
 
 ```python
-    _VERBS = {"hold": "holding", "progress": "working", "done": "labeling",
-              "legacy": "releasing"}
+    _VERBS = {"hold": "holding", "progress": "working", "done": "labeling"}
     ...
     for p in snap.panes:
         verb = _VERBS.get(p.get("kind", "hold"), "holding")
@@ -2534,7 +2618,7 @@ def build_daemon(config: Config, client=None) -> Daemon:
 - [ ] **Step 4: Run the full suite**
 
 Run: `python3 -m pytest tests/ -q`
-Expected: all pass. Also run `grep -rn "subprocess" src/herdwatch/ --include="*.py" | grep -v service.py | grep -v doctor.py | grep -v gitctx.py | grep -v probes/` — expected: no output (the daemon path spawns nothing; service/doctor/gitctx/probes legitimately shell out to launchctl/ps/git/gh/roborev, not to herdr).
+Expected: all pass. Also run `grep -rn "subprocess" src/herdwatch/ --include="*.py" | grep -v service.py | grep -v doctor.py | grep -v gitctx.py | grep -v markers.py | grep -v probes/` — expected: no output. (The daemon's herdr path spawns nothing; the exempt modules legitimately shell out: service→launchctl, doctor→`herdr status` CLI presence check + ps, gitctx→git, markers→`--until` shell commands, probes→gh/roborev.)
 
 - [ ] **Step 5: Commit**
 
@@ -2553,7 +2637,7 @@ git commit -m "feat: wire event-driven daemon into build_daemon, cli, and plugin
 
 **Interfaces:**
 - Consumes: Task 1 (`herdr_socket.request`, errors).
-- Produces: `run_checks(..., snapshot: Callable[[], dict] | None = None)` gains two required checks: "herdr socket reachable" and "herdr >= 0.7.2 (session.snapshot)".
+- Produces: `run_checks(..., snapshot: Callable[[], dict])` — a **required** keyword (only `diagnose()` passes the live `_snapshot`, so unit tests can never hit the real socket) — gains two required checks: "herdr socket reachable" and "herdr >= 0.7.2 (session.snapshot)".
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2615,10 +2699,9 @@ def _snapshot() -> dict:
     return herdr_socket.request("session.snapshot", {})
 ```
 
-Extend `run_checks(*, which, run, list_procs, plist_path, snapshot=None)`; after the "herdr server running" check insert:
+Extend the signature to `run_checks(*, which, run, list_procs, plist_path, snapshot)` — **required keyword, no default**, so no test can accidentally hit the live socket. Update the two existing tests in `tests/test_doctor.py` (`test_all_required_pass`, `test_optional_missing_is_warn_not_fail` — or whatever the current names are; both call `run_checks(...)`) to also pass `snapshot=lambda: {"agents": []}`. After the "herdr server running" check insert:
 
 ```python
-    snapshot = snapshot or _snapshot
     reachable = False
     modern = False
     detail_sock = ""
@@ -2676,7 +2759,8 @@ In the spec header change `**Status:** approved` to `**Status:** implemented`.
 - [ ] **Step 3: Full suite + no-subprocess gate**
 
 Run: `python3 -m pytest tests/ -q` — expected: all pass.
-Run: `grep -rn "agent_explain\|agent list\|poll_interval" src/ README.md` — expected: no hits in `src/`; README mentions none of them except the deprecation note if you kept one.
+Run: `grep -rn "agent_explain\|agent list" src/ README.md` — expected: no hits (the polling-era API is gone everywhere).
+Run: `grep -rn "poll_interval" src/ README.md` — expected: hits ONLY in `src/herdwatch/config.py` (the deprecation branch is intentional and must stay).
 
 - [ ] **Step 4: Commit**
 
