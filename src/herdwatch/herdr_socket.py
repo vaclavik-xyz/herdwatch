@@ -165,6 +165,7 @@ class EventStream:
     def read_events(self) -> list[dict]:
         """Drain complete event lines without blocking. On EOF or a socket
         error, parse what remains and set `closed`."""
+        events: list[dict] = []
         if not self.closed:
             while True:
                 try:
@@ -178,13 +179,27 @@ class EventStream:
                     self.closed = True
                     break
                 self._buf += chunk
+                # Continuously process complete lines to prevent buffer growth.
+                while b"\n" in self._buf:
+                    line, self._buf = self._buf.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        events.append(json.loads(line))
+                    except ValueError:
+                        pass  # skip malformed line, keep the stream alive
                 # Cap buffer growth: if buffer exceeds max size without a complete line,
                 # treat the stream as broken and close it (don't raise; just close cleanly)
                 if len(self._buf) > _MAX_RESPONSE_SIZE and b"\n" not in self._buf:
                     self.closed = True
                     self._buf = b""  # Drop the oversized garbage
                     break
-        events: list[dict] = []
+                # Also check if incomplete suffix exceeds max size (after parsing complete lines).
+                if len(self._buf) > _MAX_RESPONSE_SIZE:
+                    self.closed = True
+                    self._buf = b""
+                    break
+        # Process any remaining complete lines after socket is closed
         while b"\n" in self._buf:
             line, self._buf = self._buf.split(b"\n", 1)
             if not line.strip():
@@ -193,6 +208,10 @@ class EventStream:
                 events.append(json.loads(line))
             except ValueError:
                 pass  # skip malformed line, keep the stream alive
+        # Final check: discard any remaining oversized incomplete suffix
+        if len(self._buf) > _MAX_RESPONSE_SIZE:
+            self.closed = True
+            self._buf = b""
         return events
 
     def close(self) -> None:
