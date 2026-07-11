@@ -12,7 +12,12 @@ from .config import load as load_config
 from .daemon import MARKER_DIR, build_daemon
 from .markers import MarkerStore
 
-_VERBS = {"hold": "holding", "progress": "working", "done": "labeling"}
+_VERBS = {
+    "hold": "holding",
+    "idle-meta": "labeling",
+    "progress": "working",
+    "done": "labeling",
+}
 
 
 def _store() -> MarkerStore:

@@ -60,18 +60,68 @@ def test_agent_get_returns_record_and_none_on_failure():
 
 
 def test_report_agent_sends_params_and_maps_result():
-    req = FakeRequest({"pane.report_agent": {"type": "ok"}})
+    req = FakeRequest({
+        "pane.report_agent": {"type": "ok"},
+        "agent.get": {
+            "agent": {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "agent_status": "working",
+                "custom_status": "⏳ CI",
+            }
+        },
+    })
     c = HerdrClient(request=req)
     assert c.report_agent("w1:p1", "herdwatch", "claude", "working", "⏳ CI") is True
-    assert req.calls == [("pane.report_agent",
-                          {"pane_id": "w1:p1", "source": "herdwatch", "agent": "claude",
-                           "state": "working", "custom_status": "⏳ CI"}, None)]
+    assert req.calls == [
+        (
+            "pane.report_agent",
+            {
+                "pane_id": "w1:p1",
+                "source": "herdwatch",
+                "agent": "claude",
+                "state": "working",
+                "custom_status": "⏳ CI",
+            },
+            None,
+        ),
+        ("agent.get", {"target": "w1:p1"}, None),
+    ]
     assert HerdrClient(request=FakeRequest({"pane.report_agent": HerdrUnavailable("x")})) \
         .report_agent("w1:p1", "herdwatch", "claude", "working") is False
 
 
+def test_report_agent_rejects_transport_ok_when_state_was_not_applied():
+    req = FakeRequest({
+        "pane.report_agent": {"type": "ok"},
+        "agent.get": {
+            "agent": {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "agent_status": "idle",
+            }
+        },
+    })
+
+    assert (
+        HerdrClient(request=req).report_agent(
+            "w1:p1", "herdwatch", "claude", "working", "⏳ CI"
+        )
+        is False
+    )
+
+
 def test_report_agent_omits_custom_status_when_none():
-    req = FakeRequest({"pane.report_agent": {"type": "ok"}})
+    req = FakeRequest({
+        "pane.report_agent": {"type": "ok"},
+        "agent.get": {
+            "agent": {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "agent_status": "working",
+            }
+        },
+    })
     HerdrClient(request=req).report_agent("w1:p1", "herdwatch", "claude", "working")
     assert "custom_status" not in req.calls[0][1]
 

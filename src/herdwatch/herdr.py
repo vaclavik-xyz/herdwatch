@@ -70,7 +70,33 @@ class HerdrClient:
         params = {"pane_id": pane_id, "source": source, "agent": agent, "state": state}
         if custom_status:
             params["custom_status"] = custom_status
-        return self._call_bool("pane.report_agent", params, not_found_ok=False)
+        try:
+            self._call("pane.report_agent", params)
+        except (HerdrApiError, HerdrUnavailable) as exc:
+            log.warning("herdr pane.report_agent failed: %s", exc)
+            return False
+
+        # Herdr <= 0.7.3 returns {"type": "ok"} even when its authority
+        # arbitration silently discards the report. Read the effective state
+        # back before telling the daemon that it owns a semantic assertion.
+        observed = self.agent_get(pane_id)
+        applied = (
+            observed is not None
+            and observed.get("agent") == agent
+            and observed.get("agent_status") == state
+            and (
+                custom_status is None
+                or observed.get("custom_status") == custom_status
+            )
+        )
+        if not applied:
+            log.warning(
+                "herdr accepted pane.report_agent for %s but did not apply "
+                "the requested %s state",
+                pane_id,
+                state,
+            )
+        return applied
 
     def release_agent(self, pane_id: str, source: str, agent: str) -> str:
         """Returns "ok", "gone" (pane id unknown to herdr -- possibly moved,

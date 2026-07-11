@@ -54,6 +54,7 @@ LIFECYCLE_RESYNC_KINDS = {
 MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
 TTL_MIN_MS = 1000
 TTL_MAX_MS = 86_400_000
+LIFECYCLE_RESYNC_DEBOUNCE_S = 0.25
 log = logging.getLogger(__name__)
 
 
@@ -61,7 +62,7 @@ log = logging.getLogger(__name__)
 class ManagedPane:
     custom_status: str
     agent: str
-    kind: str = "hold"  # "hold" | "progress" | "done"
+    kind: str = "hold"  # "hold" | "idle-meta" | "progress" | "done"
     terminal_id: str = ""
 
 
@@ -112,6 +113,7 @@ class Daemon:
         self._adopted: set[str] = set()
         self._stream = None
         self._resync_due = False
+        self._resync_not_before: float | None = None
         self._last_boot_error: str | None = None
 
     # ---------- small helpers ----------
@@ -126,6 +128,23 @@ class Daemon:
         if self._allow and pane_id not in self._allow:
             return False
         return True
+
+    def _schedule_resync(self, *, debounce: bool = True) -> None:
+        was_due = self._resync_due
+        self._resync_due = True
+        if not debounce:
+            self._resync_not_before = None
+        elif not was_due:
+            self._resync_not_before = (
+                self._clock() + LIFECYCLE_RESYNC_DEBOUNCE_S
+            )
+
+    def _resync_ready(self, now: float | None = None) -> bool:
+        if not self._resync_due:
+            return False
+        if self._resync_not_before is None:
+            return True
+        return (self._clock() if now is None else now) >= self._resync_not_before
 
     def _remember_record(self, rec: dict) -> None:
         session = (rec.get("agent_session") or {}).get("value")
@@ -144,7 +163,7 @@ class Daemon:
                 "status": mp.custom_status,
                 "kind": mp.kind,
                 "terminal_id": mp.terminal_id,
-                "meta": mp.kind in ("progress", "done"),
+                "meta": mp.kind != "hold",
             }
             for pane_id, mp in sorted(self.managed.items())
         ]
@@ -289,8 +308,17 @@ class Daemon:
             self._on_status_event(data)
         elif kind in ("pane.moved", "pane_moved"):
             self._on_pane_moved(data)
+        elif kind in ("pane.agent_detected", "pane_agent_detected"):
+            pane_id = data.get("pane_id")
+            current = self._registry.get(pane_id) if pane_id else None
+            detected = data.get("agent")
+            if current is not None and (
+                not detected or detected == current.get("agent")
+            ):
+                return
+            self._schedule_resync()
         elif kind in LIFECYCLE_RESYNC_KINDS:
-            self._resync_due = True
+            self._schedule_resync()
 
     def _on_status_event(self, data: dict) -> None:
         pane_id = data.get("pane_id")
@@ -298,7 +326,7 @@ class Daemon:
             return
         rec = self._registry.get(pane_id)
         if rec is None:
-            self._resync_due = True  # unknown pane: topology drifted
+            self._schedule_resync(debounce=False)  # unknown pane: topology drifted
             return
         status = data.get("agent_status") or "unknown"
         prev = rec.get("agent_status")
@@ -307,12 +335,20 @@ class Daemon:
             rec["agent"] = data["agent"]
         mp = self.managed.get(pane_id)
         if mp is not None:
-            expected = "done" if mp.kind == "done" else "working"
+            expected = {
+                "done": "done",
+                "idle-meta": "idle",
+            }.get(mp.kind, "working")
             if (
                 status == expected
                 and (data.get("custom_status") or "") == mp.custom_status
             ):
                 return  # ack of our own report/metadata write
+        if mp is not None and mp.kind == "idle-meta" and status != "idle":
+            if not self._clear_metadata(pane_id, f"left idle ({status})"):
+                return
+            self._last_probe.pop(pane_id, None)
+            mp = None
         if mp is not None and mp.kind == "progress" and status != "working":
             # agent stopped (or blocked): drop the label now, and hold in the
             # same dispatch when the pane is idle with pending work
@@ -333,7 +369,30 @@ class Daemon:
         pane = data.get("pane") or {}
         old, new = data.get("previous_pane_id"), pane.get("pane_id")
         if not old or not new:
-            self._resync_due = True
+            self._schedule_resync(debounce=False)
+            return
+        terminal_id = pane.get("terminal_id")
+        old_record = self._registry.get(old)
+        new_record = self._registry.get(new)
+        tracked = self.managed.get(old) or self._legacy_release.get(old)
+        if old_record is None:
+            if (
+                terminal_id
+                and new_record is not None
+                and new_record.get("terminal_id") == terminal_id
+            ):
+                return  # retained replay of a move already in the snapshot
+            if (
+                not terminal_id
+                or tracked is None
+                or tracked.terminal_id != terminal_id
+            ):
+                self._schedule_resync()
+                return
+        elif not terminal_id or old_record.get("terminal_id") != terminal_id:
+            # A stale replay must never remap or tear down the current stream;
+            # let the next coalesced snapshot decide what is true now.
+            self._schedule_resync()
             return
         self._remap(old, new, pane)
         # The per-pane agent_status_changed subscription is bound to the OLD
@@ -344,7 +403,7 @@ class Daemon:
         if self._stream is not None:
             self._stream.close()
             self._stream = None
-        self._resync_due = True
+        self._schedule_resync(debounce=False)
 
     def _remap(self, old: str, new: str, rec: dict | None) -> None:
         """Follow herdr's pane-id change: the assertion lives on inside herdr,
@@ -453,6 +512,7 @@ class Daemon:
         """Snapshot is truth: reconcile managed/legacy/registry against it.
         Never raises; herdr being down keeps all state for a later retry."""
         self._resync_due = False
+        self._resync_not_before = None
         try:
             snap = self._client.session_snapshot()
         except HerdrApiError as exc:
@@ -499,7 +559,33 @@ class Daemon:
 
     # ---------- assert / release primitives ----------
 
+    def _foreign_session_owner(self, pane_id: str) -> str | None:
+        """Return a session owner that herdwatch must not displace.
+
+        Herdr 0.7.3 rejects a custom lifecycle authority while an official
+        integration owns the pane session, but still answers `ok`. More
+        importantly, releasing our rejected source can clear the official
+        pane detection. Treat such panes as metadata-only.
+        """
+        session = (self._registry.get(pane_id) or {}).get("agent_session")
+        if not isinstance(session, dict):
+            return None
+        owner = session.get("source")
+        if isinstance(owner, str) and owner and owner != SOURCE:
+            return owner
+        return None
+
     def _assert_hold(self, pane_id: str, agent: str, label: str) -> None:
+        owner = self._foreign_session_owner(pane_id)
+        if owner is not None:
+            log.warning(
+                "semantic hold unavailable for %s: herdr session is owned "
+                "by %s; showing metadata only",
+                pane_id,
+                owner,
+            )
+            self._assert_metadata(pane_id, agent, label, "idle-meta")
+            return
         if self._client.report_agent(
             pane_id, SOURCE, agent, "working", label
         ):
@@ -531,6 +617,7 @@ class Daemon:
                 kind=kind,
                 terminal_id=self._terminal_id(pane_id),
             )
+            self._adopted.discard(pane_id)
             self._meta_asserted_at[pane_id] = self._clock()
             log.info("%s %s -> %s (%s)", kind, pane_id, label, agent)
         else:
@@ -539,6 +626,21 @@ class Daemon:
     def _release_hold(self, pane_id: str, reason: str) -> bool:
         mp = self.managed.get(pane_id)
         if mp is None:
+            return True
+        owner = self._foreign_session_owner(pane_id)
+        if owner is not None:
+            # A visible foreign session proves our custom source is not the
+            # effective authority under herdr 0.7.3. Releasing the unmatched
+            # source can clear the official detection, so only forget the row.
+            del self.managed[pane_id]
+            self._adopted.discard(pane_id)
+            log.warning(
+                "dropping unowned hold %s without release; session belongs "
+                "to %s (%s)",
+                pane_id,
+                owner,
+                reason,
+            )
             return True
         outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
         if outcome == "ok":
@@ -549,7 +651,7 @@ class Daemon:
         if outcome == "gone":
             # not_found can mean moved: keep bookkeeping until resync can
             # remap it by terminal_id or confirm that the pane is truly gone.
-            self._resync_due = True
+            self._schedule_resync(debounce=False)
             log.info(
                 "release of %s answered not_found (%s); reconciling",
                 pane_id,
@@ -654,6 +756,20 @@ class Daemon:
                 self._last_probe.pop(pane_id, None)
             return
 
+        if mp is not None and mp.kind == "idle-meta":
+            if status == "idle":
+                if label:
+                    self._assert_metadata(
+                        pane_id, agent_name, label, "idle-meta"
+                    )
+                elif not self._clear_metadata(pane_id, "work cleared"):
+                    self._last_probe.pop(pane_id, None)
+                return
+            if not self._clear_metadata(pane_id, f"left idle ({status})"):
+                self._last_probe.pop(pane_id, None)
+                return
+            mp = None
+
         if mp is not None and mp.kind == "done":
             if status == "done":
                 if label:
@@ -684,12 +800,22 @@ class Daemon:
 
     def _reprobe_sweep(self) -> None:
         for pane_id, mp in list(self._legacy_release.items()):
+            owner = self._foreign_session_owner(pane_id)
+            if owner is not None:
+                del self._legacy_release[pane_id]
+                log.warning(
+                    "dropping legacy cleanup %s without release; session "
+                    "belongs to %s",
+                    pane_id,
+                    owner,
+                )
+                continue
             outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
             if outcome == "ok":
                 del self._legacy_release[pane_id]
                 log.info("released legacy assertion on %s", pane_id)
             elif outcome == "gone":
-                self._resync_due = True
+                self._schedule_resync(debounce=False)
 
         for pane_id in list(self.managed):
             mp = self.managed.get(pane_id)
@@ -758,11 +884,7 @@ class Daemon:
         for pane_id, mp in list(self.managed.items()):
             try:
                 if mp.kind == "hold":
-                    if (
-                        self._client.release_agent(pane_id, SOURCE, mp.agent)
-                        == "ok"
-                    ):
-                        del self.managed[pane_id]
+                    self._release_hold(pane_id, "shutdown")
                 else:
                     # Metadata self-expires via TTL; drop the row either way.
                     self._client.report_metadata(
@@ -779,6 +901,10 @@ class Daemon:
 
         for pane_id, mp in list(self._legacy_release.items()):
             try:
+                owner = self._foreign_session_owner(pane_id)
+                if owner is not None:
+                    del self._legacy_release[pane_id]
+                    continue
                 if (
                     self._client.release_agent(pane_id, SOURCE, mp.agent)
                     == "ok"
@@ -824,6 +950,7 @@ class Daemon:
                         registered = self._stream
                         self._last_probe.clear()
                         self._resync_due = False
+                        self._resync_not_before = None
                         self._reprobe_sweep()
                         self._progress_sweep()
                         now = self._clock()
@@ -837,9 +964,16 @@ class Daemon:
                     continue
 
                 now = self._clock()
+                deadlines = [next_reprobe, next_progress, next_resync]
+                if self._resync_due:
+                    deadlines.append(
+                        self._resync_not_before
+                        if self._resync_not_before is not None
+                        else now
+                    )
                 timeout = max(
                     0.0,
-                    min(next_reprobe, next_progress, next_resync) - now,
+                    min(deadlines) - now,
                 )
                 ready = selector.select(timeout)
                 processed_event = False
@@ -872,7 +1006,7 @@ class Daemon:
                         connected_at = None
                         continue
 
-                if self._resync_due:
+                if self._resync_ready(self._clock()):
                     self._resync()
                     if self._stream is None:
                         continue

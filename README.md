@@ -12,9 +12,10 @@ nothing's happening, because the real work is off-screen. So a pane that *looks*
 finished isn't, and you can't trust the sidebar at a glance.
 
 herdwatch fixes that: while background work is still pending after an agent goes
-idle, it keeps that pane shown as **working** with a `⏳` label saying what it's
-waiting on (CI, roborev review, a manual marker, or — opt-in — a background job),
-and releases it the moment the work clears.
+idle, it adds a `⏳` label saying what it is waiting on (CI, roborev review, a
+manual marker, or — opt-in — a background job). When herdr permits a custom
+lifecycle authority, herdwatch also keeps the pane shown as **working** and
+releases it the moment the work clears.
 
 > **Setting this up via a coding agent?** Point it at [AGENTS.md](AGENTS.md) — a
 > runbook it can follow to install, enable, and verify herdwatch on your machine.
@@ -27,10 +28,11 @@ socket API. It bootstraps from `session.snapshot`, subscribes to herdr's socket
 events (`pane.agent_status_changed` per pane plus lifecycle events), reacts to
 idle/done edges within ~100 ms, and re-verifies against a fresh snapshot every
 `resync_interval_s` (60 s by default), so correctness never depends on seeing
-every event. For idle panes, it runs a set of probes; while any probe is pending
-it asserts `working` + a `⏳` label via `pane.report_agent`, and releases the pane
-when the work clears. No changes to herdr, no per-agent setup, and it works for
-any agent herdr tracks.
+every event. Retained lifecycle-event replays are coalesced before that snapshot,
+so the subscription stays drained. For idle panes, herdwatch runs a set of
+probes; while any probe is pending it requests `working` + a `⏳` label via
+`pane.report_agent` and reads the state back before recording ownership. No
+changes to herdr or per-agent setup are needed.
 
 A pane herdr reports as `done` keeps that semantic state. If work is still
 pending, herdwatch adds a **display-only** `⏳` label via
@@ -38,14 +40,16 @@ pending, herdwatch adds a **display-only** `⏳` label via
 transitions it from `done` to `idle`, herdwatch clears the metadata label; if
 the work is still pending, a normal `working ⏳` hold takes over.
 
-**The key trick** (reusable for any similar tool): a state reported through
-`herdr pane report-agent --source <name>` is *authoritative and durable over
-herdr's own screen-detection* for as long as that source holds it. So herdwatch
-never fights the screen scraper — it just asserts `working` from its own source
-and later releases, and herdr honours it. That single property is what makes a
-non-invasive "hold this pane" daemon possible without forking herdr.
+**The key trick** (reusable for any similar tool): when accepted, a state
+reported through `herdr pane report-agent --source <name>` is authoritative and
+durable over screen detection for as long as that source holds it. Herdr 0.7.3
+can silently reject that request when an official integration already owns the
+pane session while still returning `ok`. Herdwatch therefore verifies the
+effective state. On such a session-owned pane it uses TTL-backed display
+metadata instead: the pane remains semantically `idle`, but still shows
+`idle · ⏳ CI`, and herdwatch never releases or disturbs the official owner.
 
-The daemon also publishes the set of panes it is currently holding (and the
+The daemon also publishes the set of panes it is currently managing (and the
 recorded `⏳` label per pane) to a small JSON state file
 (`~/.local/state/herdwatch/managed.json`), so `herdwatch status` — a separate
 process — can show what herdwatch is holding right now. The snapshot records the
@@ -156,6 +160,12 @@ names to skip.
 - **Requires herdr ≥ 0.7.2.** The daemon needs socket `session.snapshot` and
   event subscriptions. There is no CLI-polling fallback; `herdwatch doctor`
   checks this requirement.
+- **Herdr 0.7.3 session ownership can prevent semantic holds.** If an official
+  integration such as `herdr:claude` or `herdr:codex` owns `agent_session`,
+  herdr rejects a third-party `pane.report_agent` lifecycle authority. Herdwatch
+  fails safe and publishes only the display label (`idle · ⏳ …`) for that
+  pane. A future herdr semantic-overlay/lease API is needed to keep these panes
+  truly `working` without impersonating or clearing the official owner.
 - **`status` is a snapshot, not a live query.** `herdwatch status` reads the
   state file the daemon writes each sweep, so it lags reality by up to one
   sweep interval. If the daemon died uncleanly the file lingers, but `status`
