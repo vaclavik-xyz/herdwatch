@@ -111,6 +111,7 @@ class EventStream:
         path = socket_path or resolve_socket_path()
         self.closed = False
         self._buf = b""
+        deadline = time.monotonic() + ack_timeout_s
         try:
             self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self._sock.settimeout(ack_timeout_s)
@@ -119,10 +120,19 @@ class EventStream:
                                   "params": {"subscriptions": subscriptions}})
             self._sock.sendall(payload.encode() + b"\n")
             while b"\n" not in self._buf:
-                chunk = self._sock.recv(_RECV_CHUNK)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise HerdrUnavailable("timeout waiting for subscribe ack")
+                self._sock.settimeout(remaining)
+                try:
+                    chunk = self._sock.recv(_RECV_CHUNK)
+                except OSError as exc:
+                    raise HerdrUnavailable(str(exc)) from exc
                 if not chunk:
                     raise HerdrUnavailable("connection closed before subscribe ack")
                 self._buf += chunk
+                if len(self._buf) > _MAX_RESPONSE_SIZE:
+                    raise HerdrUnavailable(f"subscribe ack line exceeds {_MAX_RESPONSE_SIZE} bytes")
         except HerdrUnavailable:
             self.close()
             raise
@@ -135,6 +145,9 @@ class EventStream:
         except HerdrApiError:
             self.close()
             raise
+        except ValueError:
+            self.close()
+            raise HerdrUnavailable("invalid subscribe ack JSON") from None
         self._sock.setblocking(False)
 
     def fileno(self) -> int:

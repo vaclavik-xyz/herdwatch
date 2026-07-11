@@ -304,3 +304,72 @@ def test_event_stream_raises_on_error_ack(sock_dir):
 def test_event_stream_raises_unavailable_when_no_socket(sock_dir):
     with pytest.raises(HerdrUnavailable):
         EventStream([{"type": "pane.created"}], socket_path=str(sock_dir / "no.sock"))
+
+
+def test_event_stream_raises_unavailable_on_oversized_ack(sock_dir):
+    """Regression: oversized ACK (slow-drip) should timeout/fail, not buffer indefinitely."""
+    path = str(sock_dir / "oversized_ack.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def send_oversized_ack():
+        conn, _ = srv.accept()
+        # Read and discard subscription request
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+        # Send oversized ACK without newline
+        try:
+            conn.sendall(b"x" * (1024 * 1024 + 1000))
+            time.sleep(10)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=send_oversized_ack, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(HerdrUnavailable) as exc:
+            EventStream([{"type": "pane.created"}], socket_path=path, ack_timeout_s=5.0)
+        assert "exceeds" in str(exc.value) or "timeout" in str(exc.value).lower()
+    finally:
+        srv.close()
+
+
+def test_event_stream_raises_unavailable_on_invalid_ack_json(sock_dir):
+    """Regression: invalid JSON in ACK should not leave socket unclosed."""
+    path = str(sock_dir / "invalid_ack.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def send_invalid_ack():
+        conn, _ = srv.accept()
+        # Read and discard subscription request
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+        # Send invalid JSON as ACK
+        try:
+            conn.sendall(b"not valid json\n")
+            time.sleep(10)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=send_invalid_ack, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(HerdrUnavailable):
+            EventStream([{"type": "pane.created"}], socket_path=path, ack_timeout_s=5.0)
+    finally:
+        srv.close()
