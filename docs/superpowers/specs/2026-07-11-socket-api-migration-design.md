@@ -180,10 +180,18 @@ Main loop (single thread):
    from the first successful snapshot that still contains the pane_id,
    after which `pane.moved` and resync reconciliation remap them; an
    entry whose pane_id and `terminal_id` are both gone is dropped (the
-   assertion died with the pane). Residual gap, accepted: a pane moved
-   *between* the old daemon's crash and the new daemon's first snapshot
-   cannot be mapped (no `terminal_id` recorded) and is dropped. Finish
-   with one full sweep.
+   assertion died with the pane). Backfilled `terminal_id`s are persisted
+   to the state file immediately (rows carry `terminal_id`, see below),
+   so a crash after backfill keeps the mapping. For a row with **no**
+   `terminal_id` whose pane_id is missing from the first snapshot (pane
+   moved between the old daemon's crash and the new daemon's first
+   snapshot), attempt a **label-match salvage** before dropping: if
+   exactly one snapshot record has the same `agent` and a `custom_status`
+   equal to the row's stored label, remap the entry to that pane. This is
+   safe: `release_agent(source="herdwatch")` on a pane our source never
+   asserted is a no-op, so a coincidental match cannot break anything —
+   the worst case equals dropping the row. No match / multiple matches →
+   drop. Finish with one full sweep.
 2. **Wait:** `selectors` on the stream fd, timeout = time to the nearest
    deadline (per-pane reprobe, resync).
 3. **`agent_status_changed` event:** update registry; run the same per-pane
@@ -275,6 +283,13 @@ per-pane probe throttle is the backstop against any remaining loop.
 | `working` (claude, active task list) | — | `report_metadata custom_status=<progress>` + same TTL pattern (was `report_agent working`) |
 | `working`, task list gone | — | `report_metadata clear_custom_status` |
 
+State-file rows (all kinds) persist the pane's **`terminal_id`** alongside
+pane_id/agent/status/kind, and `adopt` restores it — so a pane moved while
+the daemon was down is remapped by the first resync instead of being
+dropped as vanished (which would orphan a `"hold"` assertion under its new
+id). Rows written for metadata kinds also carry `"meta": true` so adopt
+can tell them from pre-migration semantic rows (see Bootstrap).
+
 TTL = `2 × reprobe_interval_s × 1000` ms, clamped to herdr's accepted
 `ttl_ms` range — effectively `[1000, 86_400_000]` — so a misconfigured
 `reprobe_interval_s` (0, negative, > 12 h) cannot produce an invalid
@@ -344,7 +359,12 @@ kinds stay in the state file so `herdwatch status` can show them.
   registry snapshot after the subscribe ack, legacy non-`"hold"`
   state-file rows retried until release confirms, vanished-pane
   bookkeeping drop vs herdr-down retention, resubscribe on pane-set
-  change, reconnect re-bootstrap, old-server retry loop.
+  change, reconnect re-bootstrap, old-server retry loop, legacy
+  `terminal_id` backfill persisted and restored across restart, legacy
+  row moved between failed and successful release attempts (event remap
+  and resync remap), label-match salvage (unique match remaps,
+  ambiguous/no match drops), `"hold"` row moved while the daemon was
+  down remapped via persisted `terminal_id` on first resync.
 - Live verification against the running herdr 0.7.3 before merge (verify
   skill): idle-edge latency, done-pane ⏳ visible, progress label without
   state masking, daemon restart reconciliation.
