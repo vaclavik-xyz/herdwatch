@@ -252,7 +252,8 @@ class Daemon:
         self.managed.clear()
         self._publish()
 
-    def run(self, poll_interval_s: float, sleep: Callable[[float], None] = time.sleep) -> None:
+    def run(self, poll_interval_s: float = 4.0,
+            sleep: Callable[[float], None] = time.sleep) -> None:
         atexit.register(self.release_all)
 
         def _handle_term(signum, frame):

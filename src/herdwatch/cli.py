@@ -33,7 +33,7 @@ def _cmd_daemon(args) -> int:
     snap = _state_store().read()
     if snap and snap.panes and not _state.pid_alive(snap.pid):
         daemon.adopt(snap.panes)
-    daemon.run(cfg.poll_interval_s)
+    daemon.run()
     return 0
 
 

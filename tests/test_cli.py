@@ -76,7 +76,7 @@ def test_daemon_recovers_only_from_dead_snapshot(monkeypatch):
             self.adopted = None
         def adopt(self, r):
             self.adopted = r
-        def run(self, interval):
+        def run(self, interval=None):
             pass
 
     fake = FakeDaemon()

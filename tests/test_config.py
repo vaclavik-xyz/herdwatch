@@ -3,7 +3,6 @@ from herdwatch.config import load
 
 def test_defaults_when_missing(tmp_path):
     cfg = load(str(tmp_path / "nope.toml"))
-    assert cfg.poll_interval_s == 4.0
     assert cfg.probes == {"roborev": True, "ci": True, "bgjobs": False, "marker": True}
 
 
@@ -11,7 +10,6 @@ def test_override(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text('[daemon]\npoll_interval_s = 2\n[probes]\nbgjobs = false\n')
     cfg = load(str(p))
-    assert cfg.poll_interval_s == 2
     assert cfg.probes["bgjobs"] is False
     assert cfg.probes["ci"] is True  # untouched default
 
@@ -96,3 +94,27 @@ def test_progress_ignores_non_bool(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text("[progress]\nenabled = 'yes'\n")
     assert load(str(p)).progress_enabled is True
+
+
+def test_new_interval_defaults():
+    cfg = load(path="/nonexistent/config.toml")
+    assert cfg.resync_interval_s == 60.0
+    assert cfg.progress_interval_s == 4.0
+    assert not hasattr(cfg, "poll_interval_s")
+
+
+def test_new_intervals_load_from_file(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[daemon]\nresync_interval_s = 120\n[progress]\ninterval_s = 2.5\n")
+    cfg = load(path=str(p))
+    assert cfg.resync_interval_s == 120.0
+    assert cfg.progress_interval_s == 2.5
+
+
+def test_poll_interval_is_ignored_with_warning(tmp_path, caplog):
+    p = tmp_path / "config.toml"
+    p.write_text("[daemon]\npoll_interval_s = 4\n")
+    with caplog.at_level("WARNING"):
+        cfg = load(path=str(p))
+    assert not hasattr(cfg, "poll_interval_s")
+    assert any("poll_interval_s" in r.message for r in caplog.records)
