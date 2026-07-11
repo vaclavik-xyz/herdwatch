@@ -1687,6 +1687,54 @@ def test_run_resets_backoff_when_stream_lived_past_base_interval():
     assert delays == [0.25, 0.5, 0.25]
 
 
+def test_run_resets_backoff_when_event_intentionally_replaces_stream():
+    client = FakeClient([])
+    snapshot_calls = {"n": 0}
+    old = _agent(status="working")
+    moved = _agent(pane="w2:p9", status="working", term="term-w1:p1")
+
+    def snapshot():
+        snapshot_calls["n"] += 1
+        if snapshot_calls["n"] <= 2 or snapshot_calls["n"] == 5:
+            raise HerdrUnavailable("down")
+        return {"agents": [dict(old)]}
+
+    def factory(subs):
+        stream = FakeStream(subs)
+        stream.feed(
+            {
+                "event": "pane.moved",
+                "data": {
+                    "previous_pane_id": "w1:p1",
+                    "pane": dict(moved),
+                },
+            }
+        )
+        return stream
+
+    client.session_snapshot = snapshot
+    delays = []
+
+    def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 3:
+            raise SystemExit(0)
+
+    d = make_daemon(
+        client,
+        [StaticProbe(None)],
+        stream_factory=factory,
+        backoff_base_s=0.25,
+        backoff_max_s=1.0,
+    )
+    try:
+        d.run(sleep=sleep)
+    except SystemExit:
+        pass
+
+    assert delays == [0.25, 0.5, 0.25]
+
+
 def test_run_resets_backoff_after_reconnected_stream_is_healthy():
     client = FakeClient([])
     snapshot_calls = {"n": 0}

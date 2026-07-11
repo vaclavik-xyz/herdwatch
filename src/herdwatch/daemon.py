@@ -849,6 +849,13 @@ class Daemon:
                     processed_event = bool(messages)
                     for message in messages:
                         self.dispatch_event(message)
+                    observed_at = self._clock()
+                    was_stable = (
+                        connected_at is not None
+                        and observed_at - connected_at >= self._backoff_base
+                    )
+                    if processed_event or was_stable:
+                        backoff = self._backoff_base
                     if self._stream is not stream or stream.closed:
                         unexpected_close = self._stream is stream and stream.closed
                         try:
@@ -860,14 +867,6 @@ class Daemon:
                         if self._stream is stream:
                             self._stream = None
                         if unexpected_close:
-                            disconnected_at = self._clock()
-                            was_stable = (
-                                connected_at is not None
-                                and disconnected_at - connected_at
-                                >= self._backoff_base
-                            )
-                            if processed_event or was_stable:
-                                backoff = self._backoff_base
                             sleep(backoff)
                             backoff = min(backoff * 2, self._backoff_max)
                         connected_at = None
