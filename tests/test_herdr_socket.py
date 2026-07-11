@@ -413,3 +413,37 @@ def test_event_stream_raises_unavailable_on_structurally_invalid_ack(sock_dir):
             EventStream([{"type": "pane.created"}], socket_path=path, ack_timeout_s=5.0)
     finally:
         srv.close()
+
+
+def test_event_stream_raises_unavailable_on_falsy_error_value(sock_dir):
+    """Regression: error field with falsy non-object value should still be rejected."""
+    path = str(sock_dir / "falsy_error.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def send_falsy_error():
+        conn, _ = srv.accept()
+        # Read and discard subscription request
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+        # Send ACK with falsy error value (empty array, empty string, 0, etc.)
+        try:
+            conn.sendall(b'{"id":"test","error":[]}\n')
+            time.sleep(10)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    t = threading.Thread(target=send_falsy_error, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(HerdrUnavailable):
+            EventStream([{"type": "pane.created"}], socket_path=path, ack_timeout_s=5.0)
+    finally:
+        srv.close()

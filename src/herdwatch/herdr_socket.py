@@ -144,8 +144,8 @@ class EventStream:
             msg = json.loads(line)
             if not isinstance(msg, dict):
                 raise HerdrUnavailable("subscribe ack must be a JSON object")
-            err = msg.get("error")
-            if err:
+            if "error" in msg:
+                err = msg["error"]
                 if not isinstance(err, dict):
                     raise HerdrUnavailable("subscribe ack error field must be an object")
                 raise HerdrApiError(err.get("code", "unknown"), err.get("message", ""))
