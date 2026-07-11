@@ -2278,6 +2278,147 @@ def test_run_discovers_new_marker_before_slow_sweep_reaches_pane():
     assert reported_at["value"] <= 15.0
 
 
+def test_run_new_marker_bypasses_recent_unmanaged_probe_throttle():
+    now = {"value": 0.0}
+    candidate_active = {"value": False}
+    added_at = {"value": None}
+    reported_at = {"value": None}
+    pending = Pending("marker", 40, "marker")
+
+    class StopAfterReport(FakeClient):
+        def report_agent(
+            self, pane_id, source, agent, state, custom_status=None
+        ):
+            reported_at["value"] = now["value"]
+            super().report_agent(
+                pane_id, source, agent, state, custom_status
+            )
+            raise Stop()
+
+    class MarkerAppearsAfterTargetProbe:
+        name = "marker"
+
+        def candidate_panes(self):
+            return {"w1:p1"} if candidate_active["value"] else set()
+
+        def check_pane(self, pane_id):
+            if pane_id == "w1:p1" and candidate_active["value"]:
+                return pending
+            return None
+
+        def check(self, ctx):
+            if ctx.pane_id == "w1:p1":
+                return self.check_pane(ctx.pane_id)
+            if ctx.pane_id == "w1:p2":
+                now["value"] = 2.0
+                candidate_active["value"] = True
+                added_at["value"] = now["value"]
+                return None
+            now["value"] += 16.0
+            return None
+
+    client = StopAfterReport(
+        [
+            _agent(pane="w1:p1", status="idle"),
+            _agent(pane="w1:p2", status="idle"),
+            _agent(pane="w1:p3", status="idle"),
+        ]
+    )
+    d = make_daemon(
+        client,
+        [MarkerAppearsAfterTargetProbe()],
+        stream_factory=lambda subs: FakeStream(subs),
+        clock=lambda: now["value"],
+        reprobe_interval_s=15.0,
+        resync_interval_s=999.0,
+        progress_interval_s=999.0,
+    )
+
+    try:
+        d.run(sleep=lambda delay: None)
+    except Stop:
+        pass
+
+    assert client.reports == [("w1:p1", "working", "⏳ marker")]
+    assert reported_at["value"] - added_at["value"] <= 15.0
+
+
+def test_run_noop_marker_candidate_does_not_starve_due_managed_hold():
+    now = {"value": 0.0}
+    expires_at = 5.0
+    released_at = {"value": None}
+    stream = FakeStream()
+    stream.feed(_status_event(pane="w1:p1", status="idle"))
+
+    def clock():
+        now["value"] += 0.25
+        if (
+            released_at["value"] is not None
+            and now["value"] > released_at["value"] + 0.5
+        ):
+            raise Stop()
+        if now["value"] > 100.0:
+            raise AssertionError("managed hold was starved")
+        return now["value"]
+
+    class StopAfterRelease(FakeClient):
+        def release_agent(self, pane_id, source, agent):
+            released_at["value"] = now["value"]
+            return super().release_agent(pane_id, source, agent)
+
+    class ExpiringHoldAndNoopCandidate:
+        name = "marker"
+
+        def candidate_panes(self):
+            return {"w1:p2"}
+
+        def check_pane(self, pane_id):
+            if pane_id == "w1:p1" and now["value"] < expires_at:
+                return Pending("marker", 40, "marker")
+            return None
+
+        def check(self, ctx):
+            if ctx.pane_id == "w1:p1":
+                return self.check_pane(ctx.pane_id)
+            now["value"] += 14.0
+            return None
+
+    client = StopAfterRelease(
+        [
+            _agent(pane="w1:p1", status="idle"),
+            _agent(pane="w1:p2", status="idle"),
+        ]
+    )
+    d = make_daemon(
+        client,
+        [ExpiringHoldAndNoopCandidate()],
+        stream_factory=lambda subs: stream,
+        clock=clock,
+        reprobe_interval_s=15.0,
+        resync_interval_s=999.0,
+        progress_interval_s=0.0,
+    )
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ marker",
+                "kind": "hold",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
+
+    try:
+        d.run(sleep=lambda delay: None)
+    except Stop:
+        pass
+
+    assert released_at["value"] is not None
+    assert released_at["value"] - expires_at <= 15.0
+
+
 def test_run_drains_stream_between_due_managed_reprobes():
     checks_since_read = {"value": 0, "max": 0}
     now = {"value": 0.0}

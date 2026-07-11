@@ -904,14 +904,15 @@ class Daemon:
         *,
         fast: bool = False,
         fast_only: bool = False,
-    ) -> None:
+        force: bool = False,
+    ) -> bool:
         """Make the per-pane decision from the current registry record."""
         if not self._eligible(pane_id):
-            return
+            return False
         now = self._clock()
         last = self._last_probe.get(pane_id)
-        if last is not None and (now - last) < self._reprobe:
-            return
+        if not force and last is not None and (now - last) < self._reprobe:
+            return False
 
         mp = self.managed.get(pane_id)
         rec = self._client.agent_get(pane_id)
@@ -921,10 +922,10 @@ class Daemon:
         else:
             if mp is not None and mp.kind == "hold-pending":
                 self._last_probe.pop(pane_id, None)
-                return
+                return False
             rec = self._registry.get(pane_id)
             if rec is None:
-                return
+                return False
 
         status = rec.get("agent_status") or "unknown"
         if mp is not None and mp.kind == "hold-pending":
@@ -941,15 +942,15 @@ class Daemon:
             # Recover from a missed working-to-idle/done event.
             if status != "working":
                 if not self._clear_metadata(pane_id, "agent stopped"):
-                    return
+                    return False
                 self._last_probe.pop(pane_id, None)
                 mp = None
             else:
-                return
+                return False
 
         pending = self._fast_pending(pane_id) if fast else None
         if fast_only and pending is None:
-            return
+            return False
         if pending is not None:
             label = aggregate([pending])
             agent_name = rec.get("agent") or "agent"
@@ -966,10 +967,10 @@ class Daemon:
             if label:
                 if mp.custom_status != label or pane_id in self._adopted:
                     self._assert_hold(pane_id, agent_name, label)
-                return
+                return True
             if not self._release_hold(pane_id, "work cleared"):
                 self._last_probe.pop(pane_id, None)
-            return
+            return True
 
         if mp is not None and mp.kind == "idle-meta":
             if status == "idle":
@@ -979,10 +980,10 @@ class Daemon:
                     )
                 elif not self._clear_metadata(pane_id, "work cleared"):
                     self._last_probe.pop(pane_id, None)
-                return
+                return True
             if not self._clear_metadata(pane_id, f"left idle ({status})"):
                 self._last_probe.pop(pane_id, None)
-                return
+                return True
             mp = None
 
         if mp is not None and mp.kind == "done":
@@ -991,25 +992,26 @@ class Daemon:
                     self._assert_metadata(pane_id, agent_name, label, "done")
                 elif not self._clear_metadata(pane_id, "work cleared"):
                     self._last_probe.pop(pane_id, None)
-                return
+                return True
             # Clear the done label, then let an idle pane become a hold now.
             if not self._clear_metadata(pane_id, f"left done ({status})"):
                 self._last_probe.pop(pane_id, None)
-                return
+                return True
             mp = None
 
         if status == "idle":
             if label:
                 self._assert_hold(pane_id, agent_name, label)
-            return
+            return True
         if status == "done":
             if label:
                 self._assert_metadata(pane_id, agent_name, label, "done")
-            return
+            return True
 
         # Leave unmanaged working/blocked/unknown panes alone. Forget the
         # timer so the next idle/done edge probes immediately.
         self._last_probe.pop(pane_id, None)
+        return True
 
     # ---------- sweeps ----------
 
@@ -1179,6 +1181,8 @@ class Daemon:
         registered = None
         connected_at = None
         fast_candidate_cursor = 0
+        fresh_fast_candidates: set[str] = set()
+        known_fast_candidates: set[str] = set()
         next_fast_candidate_scan = 0.0
         managed_reprobe_cursor = 0
         next_reprobe = next_progress = self._clock()
@@ -1187,6 +1191,7 @@ class Daemon:
         def _drain_probe_events() -> bool:
             """Keep the non-blocking status stream moving between probes."""
             nonlocal backoff, fast_candidate_cursor
+            nonlocal fresh_fast_candidates, known_fast_candidates
             nonlocal managed_reprobe_cursor, next_fast_candidate_scan
             stream = self._stream
             if stream is None or stream.closed:
@@ -1218,7 +1223,19 @@ class Daemon:
                 and candidate_now >= next_fast_candidate_scan
             ):
                 next_fast_candidate_scan = candidate_now + 1.0
-                candidates = sorted(self._fast_pending_candidates())
+                candidate_set = self._fast_pending_candidates()
+                fresh_fast_candidates.intersection_update(candidate_set)
+                fresh_fast_candidates.update(
+                    candidate_set - known_fast_candidates
+                )
+                known_fast_candidates = candidate_set
+                candidates = sorted(
+                    candidate_set,
+                    key=lambda pane_id: (
+                        pane_id not in fresh_fast_candidates,
+                        pane_id,
+                    ),
+                )
                 for offset in range(len(candidates)):
                     index = (
                         fast_candidate_cursor + offset
@@ -1228,10 +1245,14 @@ class Daemon:
                     if rec.get("agent_status") not in ("idle", "done"):
                         continue
                     fast_candidate_cursor = (index + 1) % len(candidates)
-                    self._probe_pane(
-                        pane_id, fast=True, fast_only=True
+                    force = pane_id in fresh_fast_candidates
+                    fast_candidate_checked = self._probe_pane(
+                        pane_id,
+                        fast=True,
+                        fast_only=True,
+                        force=force,
                     )
-                    fast_candidate_checked = True
+                    fresh_fast_candidates.discard(pane_id)
                     break
             if (
                 self._stream is stream
