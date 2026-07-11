@@ -126,3 +126,52 @@ def test_request_raises_unavailable_on_eof(tmp_path):
             request("ping", {}, socket_path=path)
     finally:
         srv.close()
+
+
+def test_request_raises_unavailable_on_oversized_response(tmp_path):
+    # server that sends data without newline indefinitely
+    path = str(tmp_path / "bloat.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def send_oversized():
+        conn, _ = srv.accept()
+        # Send data larger than the limit without newline
+        conn.sendall(b"x" * (1024 * 100))  # 100KB of data without newline
+        conn.close()
+
+    t = threading.Thread(target=send_oversized, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(HerdrUnavailable):
+            request("ping", {}, socket_path=path, timeout_s=1.0)
+    finally:
+        srv.close()
+
+
+def test_request_raises_unavailable_on_slow_drip(tmp_path):
+    # server that sends data very slowly (slowly drip attack):
+    # each byte within timeout but unbounded total time
+    import time
+    path = str(tmp_path / "slow.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def send_slow_drip():
+        conn, _ = srv.accept()
+        # Send 1KB of data, 1 byte per recv call with pauses
+        # Each pause is less than timeout, but total time exceeds it
+        for i in range(1024):
+            conn.send(b"x")
+            time.sleep(0.5)  # 0.5s per byte = 512s total >> 1s timeout
+        conn.close()
+
+    t = threading.Thread(target=send_slow_drip, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(HerdrUnavailable):
+            request("ping", {}, socket_path=path, timeout_s=1.0)
+    finally:
+        srv.close()

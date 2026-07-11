@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 
 DEFAULT_SOCKET_PATH = "~/.config/herdr/herdr.sock"
 SESSION_SOCKET_PATH = "~/.config/herdr/sessions/{name}/herdr.sock"
 _RECV_CHUNK = 65536
+_MAX_RESPONSE_SIZE = 1024 * 1024  # 1MB max for a single NDJSON line
 
 
 class HerdrUnavailable(Exception):
@@ -54,6 +56,8 @@ def _parse_response(line: bytes) -> dict:
 def request(method: str, params: dict, *, socket_path: str | None = None,
             timeout_s: float = 10.0) -> dict:
     path = socket_path or resolve_socket_path()
+    deadline = time.time() + timeout_s
+
     try:
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         conn.settimeout(timeout_s)
@@ -68,6 +72,10 @@ def request(method: str, params: dict, *, socket_path: str | None = None,
             raise HerdrUnavailable(str(exc)) from exc
         buf = b""
         while b"\n" not in buf:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise HerdrUnavailable("timeout waiting for response")
+            conn.settimeout(min(remaining, timeout_s))
             try:
                 chunk = conn.recv(_RECV_CHUNK)
             except OSError as exc:
@@ -75,6 +83,8 @@ def request(method: str, params: dict, *, socket_path: str | None = None,
             if not chunk:
                 raise HerdrUnavailable("connection closed before response")
             buf += chunk
+            if len(buf) > _MAX_RESPONSE_SIZE:
+                raise HerdrUnavailable(f"response line exceeds {_MAX_RESPONSE_SIZE} bytes")
     finally:
         conn.close()
     return _parse_response(buf.split(b"\n", 1)[0])
