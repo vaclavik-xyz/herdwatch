@@ -1193,6 +1193,35 @@ def test_idle_edge_event_probes_immediately():
     assert client.reports == [("w1:p1", "working", "⏳ review")]
 
 
+def test_idle_edge_marker_skips_slower_probes():
+    client = FakeClient([_agent(status="working")])
+    slow_calls = []
+
+    class Marker:
+        name = "marker"
+
+        def check(self, ctx):
+            return Pending("deploy", 40, "marker")
+
+    class Slow:
+        name = "slow"
+
+        def check(self, ctx):
+            slow_calls.append(ctx.pane_id)
+            return Pending("review", 30, "roborev")
+
+    d = make_daemon(
+        client, [Marker(), Slow()], reprobe_interval_s=15
+    )
+    seed(d, client)
+    client.agents["w1:p1"]["agent_status"] = "idle"
+
+    d.dispatch_event(_status_event(status="idle"))
+
+    assert client.reports == [("w1:p1", "working", "⏳ deploy")]
+    assert slow_calls == []
+
+
 def test_stale_working_event_reprobes_current_idle_state():
     client = FakeClient([_agent(status="idle")])
     d = make_daemon(

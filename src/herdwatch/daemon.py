@@ -465,7 +465,7 @@ class Daemon:
         if status in ("idle", "done"):
             if prev != status:
                 self._last_probe.pop(pane_id, None)  # fresh edge: probe now
-            self._probe_pane(pane_id)
+            self._probe_pane(pane_id, fast=True)
             self._publish()
             return
         # working/blocked/unknown edge: forget the timer so the next
@@ -844,7 +844,7 @@ class Daemon:
             worktree_heads=gi.worktree_heads,
         )
 
-    def _run_probes(self, ctx: PaneContext) -> str | None:
+    def _run_probes(self, ctx: PaneContext, *, fast: bool = False) -> str | None:
         pendings = []
         for probe in self._probes:
             try:
@@ -858,9 +858,11 @@ class Daemon:
                 result = None
             if result:
                 pendings.append(result)
+                if fast and result.source == "marker":
+                    break
         return aggregate(pendings)
 
-    def _probe_pane(self, pane_id: str) -> None:
+    def _probe_pane(self, pane_id: str, *, fast: bool = False) -> None:
         """Make the per-pane decision from the current registry record."""
         if not self._eligible(pane_id):
             return
@@ -904,7 +906,7 @@ class Daemon:
                 return
 
         ctx = self._context(rec)
-        label = self._run_probes(ctx)
+        label = self._run_probes(ctx, fast=fast)
         self._last_probe[pane_id] = now
         agent_name = ctx.agent
 
