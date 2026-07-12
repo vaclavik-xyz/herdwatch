@@ -1,5 +1,6 @@
 from herdwatch.cache import TTLCache
-from herdwatch.models import PaneContext, WorktreeHead
+from herdwatch.aggregate import aggregate
+from herdwatch.models import PaneContext, PanePeer, Pending, WorktreeHead
 from herdwatch.probes.ci import CIProbe
 
 def _ctx(**kw):
@@ -99,3 +100,220 @@ def test_worktree_run_not_matched_to_wrong_sha():
     probe = CIProbe(_cache(), run_gh=lambda cwd, br: [
         {"headSha": "zzz", "status": "in_progress", "workflowName": "ci"}])
     assert probe.check(_ctx(worktree_heads=_TWO_HEADS)) is None
+
+
+def test_pending_run_is_owned_by_only_working_repo_peer():
+    peers = (
+        PanePeer("w1:p1", "idle", "abc", "main"),
+        PanePeer("w1:p2", "working", "abc", "main"),
+    )
+
+    def run_gh(cwd, branch):
+        if branch == "feat/x":
+            return [{
+                "headSha": "def",
+                "status": "in_progress",
+                "workflowName": "CI",
+            }]
+        return []
+
+    probe = CIProbe(_cache(), run_gh=run_gh)
+    common = dict(
+        worktree_heads=_TWO_HEADS,
+        repo_key="/repo/.git",
+        repo_peers=peers,
+    )
+
+    assert probe.check(_ctx(pane_id="w1:p1", **common)) is None
+    pending = probe.check(
+        _ctx(pane_id="w1:p2", status="working", **common)
+    )
+
+    assert pending is not None
+    assert pending.label == "CI: CI"
+    assert pending.show_while_working is True
+
+
+def test_pending_owner_is_retained_after_becoming_idle():
+    same_sha_heads = (
+        WorktreeHead(head_sha="abc", branch="main"),
+        WorktreeHead(head_sha="abc", branch="feat/x"),
+    )
+    working_peers = (
+        PanePeer("w1:p1", "idle", "abc", "main"),
+        PanePeer("w1:p2", "working", "abc", "main"),
+    )
+    idle_peers = (
+        PanePeer("w1:p1", "idle", "abc", "main"),
+        PanePeer("w1:p2", "idle", "abc", "main"),
+    )
+
+    def run_gh(cwd, branch):
+        if branch == "feat/x":
+            return [{
+                "headSha": "abc",
+                "status": "queued",
+                "workflowName": "CI",
+            }]
+        return []
+
+    probe = CIProbe(_cache(), run_gh=run_gh)
+    common = dict(worktree_heads=same_sha_heads, repo_key="/repo/.git")
+
+    assert probe.check(_ctx(
+        pane_id="w1:p2",
+        status="working",
+        repo_peers=working_peers,
+        **common,
+    )) is not None
+    assert probe.check(_ctx(
+        pane_id="w1:p1",
+        repo_peers=idle_peers,
+        **common,
+    )) is None
+    assert probe.check(_ctx(
+        pane_id="w1:p2",
+        repo_peers=idle_peers,
+        **common,
+    )) is not None
+
+
+def test_ambiguous_idle_repo_peers_do_not_receive_ci_badge():
+    peers = (
+        PanePeer("w1:p1", "idle", "abc", "main"),
+        PanePeer("w1:p2", "idle", "abc", "main"),
+    )
+    probe = CIProbe(_cache(), run_gh=lambda cwd, branch: [{
+        "headSha": "def",
+        "status": "in_progress",
+        "workflowName": "CI",
+    }] if branch == "feat/x" else [])
+    common = dict(
+        worktree_heads=_TWO_HEADS,
+        repo_key="/repo/.git",
+        repo_peers=peers,
+    )
+
+    assert probe.check(_ctx(pane_id="w1:p1", **common)) is None
+    assert probe.check(_ctx(pane_id="w1:p2", **common)) is None
+
+
+def test_exact_checkout_owner_wins_over_working_repo_peer():
+    same_sha_heads = (
+        WorktreeHead(head_sha="abc", branch="main"),
+        WorktreeHead(head_sha="abc", branch="feat/x"),
+    )
+    peers = (
+        PanePeer("w1:p1", "working", "abc", "main"),
+        PanePeer("w1:p2", "idle", "abc", "feat/x"),
+    )
+    probe = CIProbe(_cache(), run_gh=lambda cwd, branch: [{
+        "headSha": "abc",
+        "status": "in_progress",
+        "workflowName": "CI",
+    }] if branch == "feat/x" else [])
+    common = dict(
+        worktree_heads=same_sha_heads,
+        repo_key="/repo/.git",
+        repo_peers=peers,
+    )
+
+    assert probe.check(_ctx(
+        pane_id="w1:p1",
+        status="working",
+        **common,
+    )) is None
+    assert probe.check(_ctx(
+        pane_id="w1:p2",
+        head_sha="abc",
+        branch="feat/x",
+        **common,
+    )) is not None
+
+
+def test_ambiguous_same_branch_peers_do_not_fall_back_to_other_working_pane():
+    same_sha_heads = (
+        WorktreeHead(head_sha="abc", branch="main"),
+        WorktreeHead(head_sha="abc", branch="feat/x"),
+    )
+    peers = (
+        PanePeer("w1:p1", "working", "abc", "main"),
+        PanePeer("w1:p2", "idle", "abc", "feat/x"),
+        PanePeer("w1:p3", "idle", "abc", "feat/x"),
+    )
+    probe = CIProbe(_cache(), run_gh=lambda cwd, branch: [{
+        "headSha": "abc",
+        "status": "in_progress",
+        "workflowName": "CI",
+    }] if branch == "feat/x" else [])
+    common = dict(
+        worktree_heads=same_sha_heads,
+        repo_key="/repo/.git",
+        repo_peers=peers,
+    )
+
+    for peer in peers:
+        assert probe.check(_ctx(
+            pane_id=peer.pane_id,
+            status=peer.status,
+            branch=peer.branch,
+            **common,
+        )) is None
+
+
+def test_herdwatch_hold_is_not_counted_as_real_working_owner():
+    peers = (
+        PanePeer(
+            "w1:p1",
+            "working",
+            "abc",
+            "main",
+            "⏳ review",
+            herdwatch_hold=True,
+        ),
+        PanePeer("w1:p2", "working", "abc", "main"),
+    )
+    probe = CIProbe(_cache(), run_gh=lambda cwd, branch: [{
+        "headSha": "def",
+        "status": "in_progress",
+        "workflowName": "CI",
+    }] if branch == "feat/x" else [])
+    common = dict(
+        worktree_heads=_TWO_HEADS,
+        repo_key="/repo/.git",
+        repo_peers=peers,
+    )
+
+    assert probe.check(_ctx(
+        pane_id="w1:p1",
+        status="working",
+        **common,
+    )) is None
+    assert probe.check(_ctx(
+        pane_id="w1:p2",
+        status="working",
+        **common,
+    )) is not None
+
+
+def test_truncated_ci_label_recovers_existing_owner():
+    workflow = "very-long-workflow-name-that-will-be-truncated"
+    label = f"CI: {workflow}"
+    displayed = aggregate([Pending(label, 20, "ci", True)])
+    peers = (
+        PanePeer("w1:p1", "idle", "abc", "main"),
+        PanePeer("w1:p2", "idle", "abc", "main", displayed),
+    )
+    probe = CIProbe(_cache(), run_gh=lambda cwd, branch: [{
+        "headSha": "def",
+        "status": "in_progress",
+        "workflowName": workflow,
+    }] if branch == "feat/x" else [])
+    common = dict(
+        worktree_heads=_TWO_HEADS,
+        repo_key="/repo/.git",
+        repo_peers=peers,
+    )
+
+    assert probe.check(_ctx(pane_id="w1:p1", **common)) is None
+    assert probe.check(_ctx(pane_id="w1:p2", **common)) is not None

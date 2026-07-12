@@ -4,9 +4,11 @@ import socket as _socket
 import time
 
 from herdwatch.daemon import Daemon, ManagedPane, SOURCE, TTL_MAX_MS, TTL_MIN_MS
+from herdwatch.cache import TTLCache
 from herdwatch.gitctx import GitInfo
 from herdwatch.herdr_socket import HerdrApiError, HerdrUnavailable
 from herdwatch.models import Pending, WorktreeHead
+from herdwatch.probes.ci import CIProbe
 
 
 class FakeClient:
@@ -383,6 +385,149 @@ def test_deny_skips_pane():
     d._reprobe_sweep()
     assert client.reports == []
     assert d.managed == {}
+
+
+def test_ci_badge_targets_working_owner_then_follows_it_to_idle():
+    idle = _agent(pane="w1:p1", status="idle", agent="codex")
+    owner = _agent(pane="w1:p2", status="working", agent="codex")
+    client = FakeClient([idle, owner])
+    heads = (
+        WorktreeHead(head_sha="abc", branch="main"),
+        WorktreeHead(head_sha="def", branch="feat/x"),
+    )
+
+    def run_gh(cwd, branch):
+        if branch == "feat/x":
+            return [{
+                "headSha": "def",
+                "status": "in_progress",
+                "workflowName": "CI",
+            }]
+        return []
+
+    probe = CIProbe(TTLCache(ttl_s=10, clock=lambda: 0.0), run_gh=run_gh)
+    d = make_daemon(
+        client,
+        [probe],
+        reprobe_interval_s=0,
+        enrich=lambda cwd: GitInfo(
+            True, "abc", "main", True, heads, "/repo/.git"
+        ),
+    )
+    seed(d, client)
+
+    d._reprobe_sweep()
+
+    assert client.reports == []
+    assert client.metadata == [
+        ("w1:p2", "⏳ CI: CI", False, TTL_MIN_MS),
+    ]
+    assert set(d.managed) == {"w1:p2"}
+    assert d.managed["w1:p2"].kind == "active-meta"
+
+    client.set_agents([
+        idle,
+        _agent(pane="w1:p2", status="idle", agent="codex"),
+    ])
+    d._reprobe_sweep()
+
+    assert all(row[0] != "w1:p1" for row in client.metadata)
+    assert client.reports == [
+        ("w1:p2", "working", "⏳ CI: CI"),
+    ]
+
+
+def test_working_pane_uses_only_working_safe_pending_label():
+    client = FakeClient([_agent(status="working", agent="codex")])
+    d = make_daemon(
+        client,
+        [
+            StaticProbe(Pending("review", 30, "roborev")),
+            StaticProbe(Pending(
+                "CI: CI", 20, "ci", show_while_working=True
+            )),
+        ],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+
+    d._reprobe_sweep()
+
+    assert client.metadata == [
+        ("w1:p1", "⏳ CI: CI", False, TTL_MIN_MS),
+    ]
+
+
+def test_ci_probe_does_not_overwrite_existing_progress_metadata():
+    client = FakeClient([_claude_agent()])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending(
+            "CI: CI", 20, "ci", show_while_working=True
+        ))],
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+    d.managed["w1:p1"] = ManagedPane(
+        "2/5 Fixing auth",
+        "claude",
+        kind="progress",
+        terminal_id="term-w1:p1",
+    )
+
+    d._reprobe_sweep()
+
+    assert client.metadata == []
+    assert d.managed["w1:p1"].kind == "progress"
+
+
+def test_status_event_uses_repo_wide_context_for_ci_owner():
+    root = _agent(pane="w1:p1", status="working", agent="codex")
+    root["cwd"] = "/repo"
+    worktree = _agent(pane="w1:p2", status="working", agent="codex")
+    worktree["cwd"] = "/repo/.worktrees/feat"
+    client = FakeClient([root, worktree])
+    heads = (
+        WorktreeHead(head_sha="abc", branch="main"),
+        WorktreeHead(head_sha="def", branch="feat/x"),
+    )
+
+    def enrich(cwd):
+        head, branch = (
+            ("def", "feat/x")
+            if cwd.endswith("/feat")
+            else ("abc", "main")
+        )
+        return GitInfo(True, head, branch, True, heads, "/repo/.git")
+
+    probe = CIProbe(
+        TTLCache(ttl_s=10, clock=lambda: 0.0),
+        run_gh=lambda cwd, branch: [{
+            "headSha": "def",
+            "status": "in_progress",
+            "workflowName": "CI",
+        }] if branch == "feat/x" else [],
+    )
+    d = make_daemon(
+        client,
+        [probe],
+        enrich=enrich,
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+
+    root_idle = dict(root, agent_status="idle")
+    client.set_agents([root_idle, worktree])
+    d._on_status_event({"pane_id": "w1:p1", "agent_status": "idle"})
+    assert client.reports == []
+
+    worktree_idle = dict(worktree, agent_status="idle")
+    client.set_agents([root_idle, worktree_idle])
+    d._on_status_event({"pane_id": "w1:p2", "agent_status": "idle"})
+
+    assert client.reports == [
+        ("w1:p2", "working", "⏳ CI: CI"),
+    ]
 
 
 def test_reprobe_sweep_yields_before_and_between_panes():
@@ -953,6 +1098,42 @@ def test_progress_uses_metadata_not_report_agent():
     assert client.reports == []
     assert client.metadata == [("w1:p1", "2/5 Fixing auth", False, 30000)]
     assert d.managed["w1:p1"].kind == "progress"
+
+
+def test_progress_replaces_active_ci_metadata_on_working_claude_pane():
+    client = FakeClient([_claude_agent()])
+    d = make_daemon(client, progress=lambda sid: "2/5 Fixing auth")
+    seed(d, client)
+    d.managed["w1:p1"] = ManagedPane(
+        "⏳ CI: CI",
+        "claude",
+        kind="active-meta",
+        terminal_id="term-w1:p1",
+    )
+
+    d._progress_sweep()
+
+    assert client.metadata == [
+        ("w1:p1", "2/5 Fixing auth", False, 30000),
+    ]
+    assert d.managed["w1:p1"].kind == "progress"
+
+
+def test_progress_sweep_preserves_active_ci_metadata_on_working_codex():
+    client = FakeClient([_agent(status="working", agent="codex")])
+    d = make_daemon(client, progress=lambda sid: "unused")
+    seed(d, client)
+    d.managed["w1:p1"] = ManagedPane(
+        "⏳ CI: CI",
+        "codex",
+        kind="active-meta",
+        terminal_id="term-w1:p1",
+    )
+
+    d._progress_sweep()
+
+    assert client.metadata == []
+    assert d.managed["w1:p1"].kind == "active-meta"
 
 
 def test_progress_metadata_ttl_covers_slow_progress_interval():
