@@ -9,6 +9,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Callable
 
+from . import herdr_socket
+from .herdr_socket import HerdrApiError, HerdrUnavailable
 from .service import PLIST_PATH  # single source of truth for the launchd plist path
 
 
@@ -40,8 +42,13 @@ def _list_procs() -> list[str]:
         return []
 
 
+def _snapshot() -> dict:
+    return herdr_socket.request("session.snapshot", {})
+
+
 def run_checks(*, which: Callable[[str], bool], run: Callable[[list[str]], tuple[int, str]],
-               list_procs: Callable[[], list[str]], plist_path: str) -> list[Check]:
+               list_procs: Callable[[], list[str]], plist_path: str,
+               snapshot: Callable[[], dict]) -> list[Check]:
     checks: list[Check] = []
 
     herdr = which("herdr")
@@ -52,6 +59,35 @@ def run_checks(*, which: Callable[[str], bool], run: Callable[[list[str]], tuple
     running = bool(herdr) and status_rc == 0 and "running" in status_out.lower()
     checks.append(Check("herdr server running", running, True,
                         "" if running else "start herdr (run `herdr`)"))
+
+    reachable = False
+    modern = False
+    detail_sock = ""
+    detail_ver = ""
+    try:
+        result = snapshot()
+        reachable = True
+        if isinstance(result, dict) and isinstance(result.get("snapshot"), dict):
+            modern = True
+        else:
+            detail_ver = (
+                "session.snapshot returned an unusable payload "
+                "(missing snapshot object)"
+            )
+    except HerdrApiError as exc:
+        reachable = True
+        if exc.code == "unknown_method":
+            detail_ver = (
+                f"server rejected session.snapshot ({exc.code}); "
+                "herdwatch requires herdr >= 0.7.2 — run `herdr update`"
+            )
+        else:
+            detail_ver = f"session.snapshot failed ({exc.code}): {exc.message}"
+    except HerdrUnavailable as exc:
+        detail_sock = f"cannot reach {herdr_socket.resolve_socket_path()}: {exc}"
+        detail_ver = "unreachable"
+    checks.append(Check("herdr socket reachable", reachable, True, detail_sock))
+    checks.append(Check("herdr >= 0.7.2 (session.snapshot)", modern, True, detail_ver))
 
     gh = which("gh") and run(["gh", "auth", "status"])[0] == 0
     checks.append(Check("gh authenticated (CI probe)", bool(gh), False,
@@ -73,7 +109,8 @@ def run_checks(*, which: Callable[[str], bool], run: Callable[[list[str]], tuple
 
 
 def diagnose() -> list[Check]:
-    return run_checks(which=_which, run=_run, list_procs=_list_procs, plist_path=PLIST_PATH)
+    return run_checks(which=_which, run=_run, list_procs=_list_procs, plist_path=PLIST_PATH,
+                      snapshot=_snapshot)
 
 
 def format_report(checks: list[Check]) -> str:
