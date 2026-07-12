@@ -11,6 +11,7 @@ def test_non_repo(tmp_path):
     assert info.is_git_repo is False
     assert info.head_sha is None
     assert info.worktree_heads == ()
+    assert info.repo_key is None
 
 def test_repo_with_github_remote(tmp_path):
     _git(tmp_path, "init", "-q")
@@ -54,6 +55,7 @@ def test_worktree_heads_include_linked_worktree_on_other_branch(tmp_path):
     assert set(by_branch) == {"main", "feat/x"}
     assert by_branch["feat/x"] != by_branch["main"]
     assert len(by_branch["feat/x"]) == 40
+    assert info.repo_key == enrich(str(wt)).repo_key
 
 
 def test_detached_worktree_has_none_branch(tmp_path):

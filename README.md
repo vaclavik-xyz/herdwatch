@@ -34,6 +34,14 @@ probes; while any probe is pending it requests `working` + a `⏳` label via
 `pane.report_agent` and reads the state back before recording ownership. No
 changes to herdr or per-agent setup are needed.
 
+CI runs are assigned to one pane instead of broadcast to every pane that shares
+the repository. An exact checkout HEAD match wins; when agents operate on a
+linked worktree while their pane stays in the main checkout, herdwatch falls
+back to the repository's only actively working pane and keeps that assignment
+when the agent becomes idle. Ambiguous runs are left unassigned rather than
+labeling unrelated panes. A working owner receives the CI label as display-only
+metadata, so its real lifecycle state remains `working`.
+
 On herdr 0.7.3, herdwatch deliberately replaces the replay-heavy global
 `pane.agent_detected` feed with status subscriptions on all panes, including
 currently unknown ones. The first `unknown → working` edge still triggers an

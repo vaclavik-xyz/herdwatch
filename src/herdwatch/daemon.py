@@ -18,7 +18,7 @@ from .config import Config
 from .herdr import HerdrClient, validate_agent_record
 from .herdr_socket import HerdrApiError, HerdrUnavailable
 from .markers import MarkerStore
-from .models import PaneContext, Pending
+from .models import PaneContext, PanePeer, Pending
 from .probes.bgjobs import BgJobsProbe
 from .probes.ci import CIProbe
 from .probes.marker import MarkerProbe
@@ -71,7 +71,7 @@ log = logging.getLogger(__name__)
 class ManagedPane:
     custom_status: str
     agent: str
-    # "hold" | "hold-pending" | "idle-meta" | "progress" | "done"
+    # "hold" | "hold-pending" | "idle-meta" | "active-meta" | "progress" | "done"
     kind: str = "hold"
     terminal_id: str = ""
 
@@ -537,7 +537,11 @@ class Daemon:
                 return
             self._last_probe.pop(pane_id, None)
             mp = None
-        if mp is not None and mp.kind == "progress" and status != "working":
+        if (
+            mp is not None
+            and mp.kind in ("progress", "active-meta")
+            and status != "working"
+        ):
             # agent stopped (or blocked): drop the label now, and hold in the
             # same dispatch when the pane is idle with pending work
             if not self._clear_metadata(pane_id, "agent stopped"):
@@ -552,7 +556,11 @@ class Daemon:
         if status in ("idle", "done"):
             if prev != status:
                 self._last_probe.pop(pane_id, None)  # fresh edge: probe now
-            self._probe_pane(pane_id, fast=True)
+            self._probe_pane(
+                pane_id,
+                fast=True,
+                context=self._contexts().get(pane_id),
+            )
             self._publish()
             return
         # working/blocked/unknown edge: forget the timer so the next
@@ -1171,9 +1179,15 @@ class Daemon:
 
     # ---------- per-pane decision ----------
 
-    def _context(self, rec: dict) -> PaneContext:
+    def _context(
+        self,
+        rec: dict,
+        *,
+        gi: gitctx.GitInfo | None = None,
+        repo_peers: tuple[PanePeer, ...] = (),
+    ) -> PaneContext:
         cwd = rec.get("cwd") or rec.get("foreground_cwd") or ""
-        gi = self._enrich(cwd)
+        gi = gi or self._enrich(cwd)
         return PaneContext(
             pane_id=rec["pane_id"],
             agent=rec.get("agent") or "agent",
@@ -1184,9 +1198,47 @@ class Daemon:
             is_git_repo=gi.is_git_repo,
             has_github_remote=gi.has_github_remote,
             worktree_heads=gi.worktree_heads,
+            repo_key=gi.repo_key,
+            repo_peers=repo_peers,
         )
 
-    def _run_probes(self, ctx: PaneContext, *, fast: bool = False) -> str | None:
+    def _contexts(self) -> dict[str, PaneContext]:
+        infos_by_cwd: dict[str, gitctx.GitInfo] = {}
+        rows: dict[str, tuple[dict, gitctx.GitInfo, str]] = {}
+        groups: dict[str, list[PanePeer]] = {}
+        for pane_id, rec in self._registry.items():
+            if not self._eligible(pane_id):
+                continue
+            cwd = rec.get("cwd") or rec.get("foreground_cwd") or ""
+            gi = infos_by_cwd.get(cwd)
+            if gi is None:
+                gi = self._enrich(cwd)
+                infos_by_cwd[cwd] = gi
+            repo_key = gi.repo_key or f"cwd:{os.path.realpath(cwd)}"
+            rows[pane_id] = (rec, gi, repo_key)
+            groups.setdefault(repo_key, []).append(PanePeer(
+                pane_id=pane_id,
+                status=rec.get("agent_status") or "unknown",
+                head_sha=gi.head_sha,
+                branch=gi.branch,
+                custom_status=rec.get("custom_status"),
+                herdwatch_hold=(
+                    pane_id in self.managed
+                    and self.managed[pane_id].kind in SEMANTIC_HOLD_KINDS
+                ),
+            ))
+        return {
+            pane_id: self._context(
+                rec,
+                gi=gi,
+                repo_peers=tuple(groups[repo_key]),
+            )
+            for pane_id, (rec, gi, repo_key) in rows.items()
+        }
+
+    def _run_probes(
+        self, ctx: PaneContext, *, fast: bool = False
+    ) -> tuple[str | None, str | None]:
         pendings = []
         for probe in self._probes:
             try:
@@ -1202,7 +1254,14 @@ class Daemon:
                 pendings.append(result)
                 if fast and result.source == "marker":
                     break
-        return aggregate(pendings)
+        return (
+            aggregate(pendings),
+            aggregate([
+                pending
+                for pending in pendings
+                if pending.show_while_working
+            ]),
+        )
 
     def _fast_pending(self, pane_id: str) -> Pending | None:
         """Return a probe's pane-only result without git enrichment."""
@@ -1247,6 +1306,7 @@ class Daemon:
         fast: bool = False,
         fast_only: bool = False,
         force: bool = False,
+        context: PaneContext | None = None,
     ) -> bool:
         """Make the per-pane decision from the current registry record."""
         if not self._eligible(pane_id):
@@ -1327,15 +1387,45 @@ class Daemon:
             return False
         if pending is not None:
             label = aggregate([pending])
+            working_label = label if pending.show_while_working else None
             agent_name = rec.get("agent") or "agent"
         else:
-            ctx = self._context(rec)
-            label = self._run_probes(ctx, fast=fast)
+            ctx = (
+                context
+                or self._contexts().get(pane_id)
+                or self._context(rec)
+            )
+            label, working_label = self._run_probes(ctx, fast=fast)
             agent_name = ctx.agent
         # Throttle from completion, not start. A slow external probe can take
         # the whole interval; using its start time makes the same pane
         # immediately due again before the event stream gets another read.
         self._last_probe[pane_id] = self._clock()
+
+        if mp is not None and mp.kind == "active-meta":
+            if status == "working":
+                if working_label:
+                    stale = (
+                        self._clock()
+                        - self._meta_asserted_at.get(pane_id, 0.0)
+                    ) >= self._ttl_ms("active-meta") / 2000.0
+                    if mp.custom_status != working_label or stale:
+                        self._assert_metadata(
+                            pane_id,
+                            agent_name,
+                            working_label,
+                            "active-meta",
+                        )
+                else:
+                    if not self._clear_metadata(pane_id, "work cleared"):
+                        self._last_probe.pop(pane_id, None)
+                return True
+            if not self._clear_metadata(
+                pane_id, f"left working ({status})"
+            ):
+                self._last_probe.pop(pane_id, None)
+                return True
+            mp = None
 
         if mp is not None and mp.kind == "hold":
             if label:
@@ -1392,6 +1482,11 @@ class Daemon:
         if status == "done":
             if label:
                 self._assert_metadata(pane_id, agent_name, label, "done")
+            return True
+        if status == "working" and working_label:
+            self._assert_metadata(
+                pane_id, agent_name, working_label, "active-meta"
+            )
             return True
 
         # Leave unmanaged working/blocked/unknown panes alone. Forget the
@@ -1483,6 +1578,7 @@ class Daemon:
                 self._publish()
                 return
 
+        contexts = self._contexts()
         for pane_id in list(self.managed):
             mp = self.managed.get(pane_id)
             if mp is None:
@@ -1499,7 +1595,7 @@ class Daemon:
                     self._publish()
                     return
                 continue
-            self._probe_pane(pane_id)
+            self._probe_pane(pane_id, context=contexts.get(pane_id))
             if not yield_now():
                 self._publish()
                 return
@@ -1510,8 +1606,8 @@ class Daemon:
                     self._publish()
                     return
                 continue
-            if rec.get("agent_status") in ("idle", "done"):
-                self._probe_pane(pane_id)
+            if rec.get("agent_status") in ("working", "idle", "done"):
+                self._probe_pane(pane_id, context=contexts.get(pane_id))
             if not yield_now():
                 self._publish()
                 return
@@ -1525,13 +1621,13 @@ class Daemon:
             if not self._eligible(pane_id):
                 continue
             mp = self.managed.get(pane_id)
-            if mp is not None and mp.kind != "progress":
+            if mp is not None and mp.kind not in ("progress", "active-meta"):
                 continue
             if (
                 rec.get("agent_status") != "working"
                 or (rec.get("agent") or "") != "claude"
             ):
-                if mp is not None:
+                if mp is not None and mp.kind == "progress":
                     self._clear_metadata(
                         pane_id, "not a working Claude pane"
                     )
@@ -1551,14 +1647,19 @@ class Daemon:
                 stale = (
                     now - self._meta_asserted_at.get(pane_id, 0.0)
                 ) >= self._ttl_ms("progress") / 2000.0
-                if mp is None or mp.custom_status != label or stale:
+                if (
+                    mp is None
+                    or mp.kind != "progress"
+                    or mp.custom_status != label
+                    or stale
+                ):
                     self._assert_metadata(
                         pane_id,
                         rec.get("agent") or "agent",
                         label,
                         "progress",
                     )
-            elif mp is not None:
+            elif mp is not None and mp.kind == "progress":
                 self._clear_metadata(pane_id, "no active task")
         self._publish()
 
@@ -1673,10 +1774,15 @@ class Daemon:
             ):
                 discovered = set(self._registry) - before_ids
                 if self._stream is stream:
+                    contexts = self._contexts()
                     for pane_id in sorted(discovered):
                         rec = self._registry.get(pane_id) or {}
                         if rec.get("agent_status") in ("idle", "done"):
-                            self._probe_pane(pane_id, fast=True)
+                            self._probe_pane(
+                                pane_id,
+                                fast=True,
+                                context=contexts.get(pane_id),
+                            )
             candidate_now = self._clock()
             if (
                 self._stream is stream
@@ -1736,7 +1842,10 @@ class Daemon:
                         if last is not None and now - last < self._reprobe:
                             continue
                         managed_reprobe_cursor = (index + 1) % len(panes)
-                        self._probe_pane(pane_id)
+                        self._probe_pane(
+                            pane_id,
+                            context=self._contexts().get(pane_id),
+                        )
                         break
             return self._stream is stream and not stream.closed
 

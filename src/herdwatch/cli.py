@@ -16,6 +16,7 @@ _VERBS = {
     "hold": "holding",
     "hold-pending": "verifying",
     "idle-meta": "labeling",
+    "active-meta": "labeling",
     "progress": "working",
     "done": "labeling",
 }
