@@ -1477,6 +1477,8 @@ def test_adopt_only_recovers_semantic_holds():
     assert d.managed["w1:p1"].kind == "hold"
     assert d.managed["w1:p1"].terminal_id == "t1"
     assert d._adopted == {"w1:p1"}
+
+
 def test_release_gone_keeps_entry_and_schedules_resync():
     client = FakeClient([_agent(status="idle")])
     probe = StaticProbe(Pending("review", 30, "roborev"))

@@ -59,9 +59,9 @@ durable over screen detection for as long as that source holds it. Herdr
 can silently reject that request when an official integration already owns the
 pane session while still returning `ok`. Herdwatch therefore verifies the
 effective state. On such a session-owned pane it uses TTL-backed display
-metadata instead: the pane remains semantically `idle`, while Herdeck derives
-`WAITING` from `waiting_on`; herdwatch never releases or disturbs the official
-owner.
+metadata instead: the pane remains semantically `idle`, while the separate
+Herdeck dashboard derives `WAITING` from `waiting_on`; herdwatch never releases
+or disturbs the official owner.
 
 The daemon also publishes the set of panes it is currently managing (and the
 recorded `⏳` label per pane) to a small JSON state file
