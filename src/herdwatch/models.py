@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# shared cap for pane labels reported to herdr (custom_status)
+# Shared cap for display labels reported as Herdr metadata token values.
 LABEL_MAX_LEN = 32
 
 
@@ -26,7 +26,7 @@ class PanePeer:
     status: str
     head_sha: str | None
     branch: str | None
-    custom_status: str | None = None
+    progress: str | None = None
     herdwatch_hold: bool = False
 
 

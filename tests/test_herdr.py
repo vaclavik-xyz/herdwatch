@@ -83,12 +83,11 @@ def test_report_agent_sends_params_and_maps_result():
                 "pane_id": "w1:p1",
                 "agent": "claude",
                 "agent_status": "working",
-                "custom_status": "⏳ CI",
             }
         },
     })
     c = HerdrClient(request=req)
-    assert c.report_agent("w1:p1", "herdwatch", "claude", "working", "⏳ CI") is True
+    assert c.report_agent("w1:p1", "herdwatch", "claude", "working") is True
     assert req.calls == [
         (
             "pane.report_agent",
@@ -97,7 +96,6 @@ def test_report_agent_sends_params_and_maps_result():
                 "source": "herdwatch",
                 "agent": "claude",
                 "state": "working",
-                "custom_status": "⏳ CI",
             },
             None,
         ),
@@ -123,9 +121,7 @@ def test_report_agent_rejects_transport_ok_when_state_was_not_applied():
     })
 
     assert (
-        HerdrClient(request=req).report_agent(
-            "w1:p1", "herdwatch", "claude", "working", "⏳ CI"
-        )
+        HerdrClient(request=req).report_agent("w1:p1", "herdwatch", "claude", "working")
         is False
     )
 
@@ -137,14 +133,12 @@ def test_report_agent_returns_unknown_when_readback_is_unavailable():
     })
 
     assert (
-        HerdrClient(request=req).report_agent(
-            "w1:p1", "herdwatch", "claude", "working", "⏳ CI"
-        )
+        HerdrClient(request=req).report_agent("w1:p1", "herdwatch", "claude", "working")
         is None
     )
 
 
-def test_report_agent_omits_custom_status_when_none():
+def test_report_agent_sends_only_semantic_fields():
     req = FakeRequest({
         "pane.report_agent": {"type": "ok"},
         "agent.get": {
@@ -156,7 +150,7 @@ def test_report_agent_omits_custom_status_when_none():
         },
     })
     HerdrClient(request=req).report_agent("w1:p1", "herdwatch", "claude", "working")
-    assert "custom_status" not in req.calls[0][1]
+    assert set(req.calls[0][1]) == {"pane_id", "source", "agent", "state"}
 
 
 def test_release_agent_returns_tristate():
@@ -175,22 +169,29 @@ def test_release_agent_returns_tristate():
 def test_report_metadata_set_and_clear():
     req = FakeRequest({"pane.report_metadata": {"type": "ok"}})
     c = HerdrClient(request=req)
-    assert c.report_metadata("w1:p1", "herdwatch", agent="claude",
-                             custom_status="⏳ CI", ttl_ms=30000) is True
-    assert req.calls[-1] == ("pane.report_metadata",
-                             {"pane_id": "w1:p1", "source": "herdwatch", "agent": "claude",
-                              "custom_status": "⏳ CI", "ttl_ms": 30000}, None)
-    assert c.report_metadata("w1:p1", "herdwatch", clear_custom_status=True) is True
+    assert c.report_metadata(
+        "w1:p1", "herdwatch", tokens={"waiting_on": "⏳ CI"}, ttl_ms=30000
+    ) is True
     assert req.calls[-1] == ("pane.report_metadata",
                              {"pane_id": "w1:p1", "source": "herdwatch",
-                              "clear_custom_status": True}, None)
+                              "tokens": {"waiting_on": "⏳ CI"}, "ttl_ms": 30000}, None)
+    assert c.report_metadata(
+        "w1:p1", "herdwatch", tokens={"waiting_on": None}
+    ) is True
+    assert req.calls[-1] == ("pane.report_metadata",
+                             {"pane_id": "w1:p1", "source": "herdwatch",
+                              "tokens": {"waiting_on": None}}, None)
 
 
 def test_report_metadata_not_found_true_only_for_clear():
     err = FakeRequest({"pane.report_metadata": HerdrApiError("not_found", "gone")})
     c = HerdrClient(request=err)
-    assert c.report_metadata("w1:p1", "herdwatch", clear_custom_status=True) is True
-    assert c.report_metadata("w1:p1", "herdwatch", custom_status="⏳ CI") is False
+    assert c.report_metadata(
+        "w1:p1", "herdwatch", tokens={"waiting_on": None}
+    ) is True
+    assert c.report_metadata(
+        "w1:p1", "herdwatch", tokens={"waiting_on": "⏳ CI"}
+    ) is False
 
 
 def test_pane_process_info_maps_result_and_failure():
