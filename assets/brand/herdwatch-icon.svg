@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">herdwatch lantern icon</title>
+  <defs>
+    <linearGradient id="lime" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d9eb25"/>
+      <stop offset="1" stop-color="#b9d20d"/>
+    </linearGradient>
+    <linearGradient id="dark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#25282c"/>
+      <stop offset="1" stop-color="#17191c"/>
+    </linearGradient>
+  </defs>
+  <rect x="28" y="28" width="456" height="456" rx="66" fill="url(#dark)"/>
+  <g fill="none" stroke="url(#lime)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M184 162v-35c0-35 24-58 72-58s72 23 72 58v35" stroke-width="18"/>
+    <path d="M168 168h176l25 31H143z" fill="url(#lime)" stroke="none"/>
+    <path d="M143 199h226" stroke-width="18"/>
+    <path d="M168 216v140c0 18 12 31 30 31h116c18 0 30-13 30-31V216" stroke-width="19"/>
+    <path d="M155 387h202l23 39H132z" fill="url(#lime)" stroke="none"/>
+  </g>
+  <path d="m215 272 39 36-39 36" fill="none" stroke="#f8f9f5" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="297" cy="328" r="15" fill="url(#lime)"/>
+</svg>
