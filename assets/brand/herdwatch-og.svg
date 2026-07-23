@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">herdwatch</title>
+  <desc id="desc">A glowing terminal lantern watches over sheep on a dark pasture.</desc>
+  <defs>
+    <radialGradient id="night" cx="50%" cy="34%" r="72%">
+      <stop offset="0" stop-color="#292c30"/>
+      <stop offset="1" stop-color="#15171a"/>
+    </radialGradient>
+    <linearGradient id="lime" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d9eb25"/>
+      <stop offset="1" stop-color="#b9d20d"/>
+    </linearGradient>
+    <filter id="soft-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <g id="sheep">
+      <rect x="0" y="0" width="54" height="25" rx="13" fill="#17191b" stroke="#4b5051" stroke-width="3"/>
+      <circle cx="51" cy="14" r="9" fill="#111315"/>
+      <path d="M11 22v17M39 22v17" stroke="#71800d" stroke-width="4" stroke-linecap="round"/>
+    </g>
+  </defs>
+  <rect width="1200" height="630" fill="url(#night)"/>
+  <path d="M0 435C145 383 252 396 389 447c107 40 221 46 342-1 142-55 292-65 469-11v195H0z" fill="#272a2e"/>
+  <path d="M0 500c149 4 237-63 375-43 121 17 170 87 306 71 159-19 320-120 519-60v162H0z" fill="#202327"/>
+  <path d="M0 551c180-42 323-38 462 18 125 51 244 53 379 11 135-43 239-47 359-24v74H0z" fill="#181a1d"/>
+
+  <g transform="translate(478 86)">
+    <g fill="none" stroke="url(#lime)" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M85 112V75c0-39 27-65 81-65s81 26 81 65v37" stroke-width="19"/>
+      <path d="M67 119h198l28 35H39z" fill="url(#lime)" stroke="none"/>
+      <path d="M39 154h254" stroke-width="19"/>
+      <path d="M67 173v157c0 21 13 35 34 35h130c21 0 34-14 34-35V173" stroke-width="21"/>
+      <path d="M52 365h228l26 44H26z" fill="url(#lime)" stroke="none"/>
+    </g>
+    <path d="m120 235 44 40-44 40" fill="none" stroke="#f8f9f5" stroke-width="25" stroke-linecap="round" stroke-linejoin="round" opacity=".4" filter="url(#soft-glow)"/>
+    <circle cx="212" cy="297" r="20" fill="#cfe31b" opacity=".5" filter="url(#soft-glow)"/>
+    <path d="m120 235 44 40-44 40" fill="none" stroke="#f8f9f5" stroke-width="23" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="212" cy="297" r="17" fill="url(#lime)"/>
+  </g>
+
+  <use href="#sheep" transform="translate(105 446) scale(.70)"/>
+  <use href="#sheep" transform="translate(242 493) scale(.82)"/>
+  <use href="#sheep" transform="translate(415 544) scale(.62)"/>
+  <use href="#sheep" transform="translate(815 501) scale(.78)"/>
+  <use href="#sheep" transform="translate(1025 438) scale(.66)"/>
+</svg>

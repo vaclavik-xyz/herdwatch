@@ -1,6 +1,10 @@
-# herdwatch
+<p align="center">
+  <img src="assets/brand/herdwatch-logo.svg" alt="herdwatch" width="560">
+</p>
 
-[![CI](https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml"><img src="https://github.com/vaclavik-xyz/herdwatch/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
 
 ## The problem
 
