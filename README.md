@@ -87,9 +87,9 @@ enabled = true
 
 ## Install & run
 
-**With pipx:**
+**From the GitHub release:**
 
-    pipx install herdwatch
+    pipx install "https://github.com/vaclavik-xyz/herdwatch/releases/download/v0.2.1/herdwatch-0.2.1-py3-none-any.whl"
     herdwatch doctor
     herdwatch daemon
 
