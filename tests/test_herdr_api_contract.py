@@ -26,7 +26,24 @@ def complete_schema():
     request_defs = {
         "Subscription": {
             "oneOf": [
-                {"properties": {"type": {"const": event}}}
+                {
+                    "properties": {
+                        "type": {"const": event},
+                        **(
+                            {"pane_id": {"type": "string"}}
+                            if event == "pane.agent_status_changed"
+                            else {}
+                        ),
+                    },
+                    "required": [
+                        "type",
+                        *(
+                            ["pane_id"]
+                            if event == "pane.agent_status_changed"
+                            else []
+                        ),
+                    ],
+                }
                 for event in SUBSCRIPTIONS
             ]
         }
@@ -85,6 +102,28 @@ def test_missing_subscription_fails():
     schema = complete_schema()
     schema["schemas"]["request"]["$defs"]["Subscription"]["oneOf"].pop()
     with pytest.raises(ContractError, match="subscriptions missing"):
+        validate_schema(schema, SUBSCRIPTIONS)
+
+
+def test_subscription_parameter_change_fails():
+    schema = complete_schema()
+    variants = schema["schemas"]["request"]["$defs"]["Subscription"]["oneOf"]
+    status_variant = next(
+        row
+        for row in variants
+        if row["properties"]["type"]["const"] == "pane.agent_status_changed"
+    )
+    del status_variant["properties"]["pane_id"]
+    with pytest.raises(ContractError, match="no longer accepts fields: pane_id"):
+        validate_schema(schema, SUBSCRIPTIONS)
+
+
+def test_new_required_subscription_field_fails():
+    schema = complete_schema()
+    variant = schema["schemas"]["request"]["$defs"]["Subscription"]["oneOf"][0]
+    variant["properties"]["new_field"] = {"type": "string"}
+    variant["required"].append("new_field")
+    with pytest.raises(ContractError, match="added required fields: new_field"):
         validate_schema(schema, SUBSCRIPTIONS)
 
 

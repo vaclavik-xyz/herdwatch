@@ -42,6 +42,9 @@ RESPONSE_FIELDS = {
     },
     "PaneProcessInfo": {"shell_pid", "foreground_process_group_id"},
 }
+SUBSCRIPTION_PARAMS = {
+    "pane.agent_status_changed": {"type", "pane_id"},
+}
 
 
 class ContractError(RuntimeError):
@@ -117,16 +120,32 @@ def validate_schema(
             )
 
     request_defs = schema["schemas"]["request"]["$defs"]
-    supported_subscriptions = {
-        row.get("properties", {}).get("type", {}).get("const")
+    subscription_variants = {
+        row.get("properties", {}).get("type", {}).get("const"): row
         for row in request_defs["Subscription"]["oneOf"]
     }
-    missing_subscriptions = subscriptions - supported_subscriptions
+    missing_subscriptions = subscriptions - set(subscription_variants)
     if missing_subscriptions:
         raise ContractError(
             "subscriptions missing: "
             f"{', '.join(sorted(missing_subscriptions))}"
         )
+    for event in subscriptions:
+        variant = subscription_variants[event]
+        sent_fields = SUBSCRIPTION_PARAMS.get(event, {"type"})
+        properties = set(variant.get("properties", {}))
+        missing_fields = sent_fields - properties
+        if missing_fields:
+            raise ContractError(
+                f"{event} no longer accepts fields: "
+                f"{', '.join(sorted(missing_fields))}"
+            )
+        newly_required = set(variant.get("required", [])) - sent_fields
+        if newly_required:
+            raise ContractError(
+                f"{event} added required fields: "
+                f"{', '.join(sorted(newly_required))}"
+            )
 
     response_defs = schema["schemas"]["success_response"]["$defs"]
     for type_name, required_fields in RESPONSE_FIELDS.items():
