@@ -101,7 +101,7 @@ class CIProbe:
                 labeled = [
                     peer
                     for peer in peers
-                    if peer.custom_status == expected_status
+                    if peer.progress == expected_status
                 ]
                 if len(labeled) == 1:
                     owner = labeled[0].pane_id

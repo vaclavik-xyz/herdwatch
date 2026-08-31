@@ -8,8 +8,8 @@ with it). `release_agent` is the exception — it returns "ok" / "gone" /
 "failed", because `not_found` may mean the pane was *moved* (assertion
 alive under a new pane id): the caller must reconcile before dropping
 bookkeeping. `session_snapshot` raises instead — the daemon needs to tell
-"herdr is down" (HerdrUnavailable, retry with backoff) from "server too
-old for session.snapshot" (HerdrApiError, log the >= 0.7.2 requirement).
+"herdr is down" (HerdrUnavailable, retry with backoff) from an incompatible
+server (HerdrApiError, log the >= 0.7.4 requirement).
 """
 from __future__ import annotations
 
@@ -50,13 +50,19 @@ def validate_agent_record(
         "agent_status",
         "cwd",
         "foreground_cwd",
-        "custom_status",
     ):
         value = record.get(field)
         if value is not None and not isinstance(value, str):
             raise HerdrUnavailable(
                 f"{context} {field} must be a string or null"
             )
+    tokens = record.get("tokens")
+    if tokens is not None and (
+        not isinstance(tokens, dict)
+        or not all(isinstance(key, str) for key in tokens)
+        or not all(isinstance(value, str) for value in tokens.values())
+    ):
+        raise HerdrUnavailable(f"{context} tokens must be a string map")
     session = record.get("agent_session")
     if session is not None and not isinstance(session, dict):
         raise HerdrUnavailable(
@@ -125,11 +131,15 @@ class HerdrClient:
             log.warning("agent.get %s returned invalid data: %s", pane_id, exc)
             return None
 
-    def report_agent(self, pane_id: str, source: str, agent: str, state: str,
-                     custom_status: str | None = None) -> bool | None:
-        params = {"pane_id": pane_id, "source": source, "agent": agent, "state": state}
-        if custom_status:
-            params["custom_status"] = custom_status
+    def report_agent(
+        self, pane_id: str, source: str, agent: str, state: str
+    ) -> bool | None:
+        params = {
+            "pane_id": pane_id,
+            "source": source,
+            "agent": agent,
+            "state": state,
+        }
         try:
             self._call("pane.report_agent", params)
         except HerdrApiError as exc:
@@ -141,9 +151,8 @@ class HerdrClient:
             log.warning("herdr pane.report_agent outcome is unknown: %s", exc)
             return None
 
-        # Herdr <= 0.7.3 returns {"type": "ok"} even when its authority
-        # arbitration silently discards the report. Read the effective state
-        # back before telling the daemon that it owns a semantic assertion.
+        # Authority arbitration can accept a request without making it the
+        # effective lifecycle source. Always verify the applied state.
         observed = self.agent_get(pane_id)
         if observed is None:
             log.warning(
@@ -155,10 +164,6 @@ class HerdrClient:
         applied = (
             observed.get("agent") == agent
             and observed.get("agent_status") == state
-            and (
-                custom_status is None
-                or observed.get("custom_status") == custom_status
-            )
         )
         if not applied:
             log.warning(
@@ -185,21 +190,21 @@ class HerdrClient:
             log.warning("herdr unavailable for pane.release_agent: %s", exc)
             return "failed"
 
-    def report_metadata(self, pane_id: str, source: str, *, agent: str | None = None,
-                        custom_status: str | None = None,
-                        clear_custom_status: bool = False,
-                        ttl_ms: int | None = None) -> bool:
-        params: dict = {"pane_id": pane_id, "source": source}
-        if agent:
-            params["agent"] = agent
-        if clear_custom_status:
-            params["clear_custom_status"] = True
-        if custom_status is not None:
-            params["custom_status"] = custom_status
+    def report_metadata(
+        self,
+        pane_id: str,
+        source: str,
+        *,
+        tokens: dict[str, str | None],
+        ttl_ms: int | None = None,
+    ) -> bool:
+        params: dict = {"pane_id": pane_id, "source": source, "tokens": tokens}
         if ttl_ms is not None:
             params["ttl_ms"] = ttl_ms
-        return self._call_bool("pane.report_metadata", params,
-                               not_found_ok=clear_custom_status)
+        clearing = bool(tokens) and all(value is None for value in tokens.values())
+        return self._call_bool(
+            "pane.report_metadata", params, not_found_ok=clearing
+        )
 
     def pane_process_info(self, pane_id: str) -> dict:
         try:

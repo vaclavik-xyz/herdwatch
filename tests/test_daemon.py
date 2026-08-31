@@ -19,6 +19,7 @@ class FakeClient:
         self.reports = []
         self.releases = []
         self.metadata = []
+        self.metadata_tokens = []
         self._report_ok = report_ok
         self._release_result = "ok" if release_ok else "failed"
         self._meta_ok = meta_ok
@@ -36,8 +37,8 @@ class FakeClient:
         agent = self.agents.get(pane_id)
         return dict(agent) if agent is not None else None
 
-    def report_agent(self, pane_id, source, agent, state, custom_status=None):
-        self.reports.append((pane_id, state, custom_status))
+    def report_agent(self, pane_id, source, agent, state):
+        self.reports.append((pane_id, state))
         return self._report_ok
 
     def release_agent(self, pane_id, source, agent):
@@ -49,12 +50,13 @@ class FakeClient:
         pane_id,
         source,
         *,
-        agent=None,
-        custom_status=None,
-        clear_custom_status=False,
+        tokens,
         ttl_ms=None,
     ):
-        self.metadata.append((pane_id, custom_status, clear_custom_status, ttl_ms))
+        label = next((value for value in tokens.values() if value is not None), None)
+        clear_label = bool(tokens) and all(value is None for value in tokens.values())
+        self.metadata.append((pane_id, label, clear_label, ttl_ms))
+        self.metadata_tokens.append((pane_id, dict(tokens), ttl_ms))
         return self._meta_ok
 
     def pane_process_info(self, pane_id):
@@ -164,7 +166,10 @@ def test_asserts_working_when_pending():
     d = make_daemon(client, [StaticProbe(Pending("review", 30, "roborev"))])
     seed(d, client)
     d._reprobe_sweep()
-    assert client.reports == [("w1:p1", "working", "⏳ review")]
+    assert client.reports == [("w1:p1", "working")]
+    assert client.metadata_tokens == [
+        ("w1:p1", {"waiting_on": "⏳ review"}, 30000)
+    ]
     assert "w1:p1" in d.managed
     assert d.managed["w1:p1"].kind == "hold"
     assert d.managed["w1:p1"].terminal_id == "term-w1:p1"
@@ -202,8 +207,12 @@ def test_idle_metadata_upgrades_to_hold_when_foreign_owner_disappears():
     client.agents["w1:p1"].pop("agent_session")
     d._reprobe_sweep()
 
-    assert client.metadata[-1] == ("w1:p1", None, True, None)
-    assert client.reports == [("w1:p1", "working", "⏳ review")]
+    assert client.metadata_tokens[-1] == (
+        "w1:p1",
+        {"waiting_on": "⏳ review"},
+        1000,
+    )
+    assert client.reports == [("w1:p1", "working")]
     assert d.managed["w1:p1"].kind == "hold"
 
 
@@ -237,7 +246,9 @@ def test_foreign_session_idle_metadata_clears_without_lifecycle_release():
     d._reprobe_sweep()
 
     assert client.releases == []
-    assert client.metadata[-1] == ("w1:p1", None, True, None)
+    assert client.metadata_tokens[-1] == (
+        "w1:p1", {"waiting_on": None}, None
+    )
     assert "w1:p1" not in d.managed
 
 
@@ -293,7 +304,7 @@ def test_reasserts_only_on_label_change():
     assert len(client.reports) == 1
     probe.result = Pending("CI: ci", 20, "ci")
     d._reprobe_sweep()
-    assert client.reports[-1] == ("w1:p1", "working", "⏳ CI: ci")
+    assert client.reports[-1] == ("w1:p1", "working")
 
 
 def test_uncertain_label_update_preserves_verified_hold_for_cleanup():
@@ -303,7 +314,7 @@ def test_uncertain_label_update_preserves_verified_hold_for_cleanup():
     seed(d, client)
     d._reprobe_sweep()
     client.agents["w1:p1"].update(
-        agent_status="working", custom_status="⏳ review"
+        agent_status="working", tokens={"waiting_on": "⏳ review"}
     )
 
     probe.result = Pending("CI: ci", 20, "ci")
@@ -311,7 +322,7 @@ def test_uncertain_label_update_preserves_verified_hold_for_cleanup():
     d._reprobe_sweep()
 
     assert d.managed["w1:p1"].kind == "hold"
-    assert d.managed["w1:p1"].custom_status == "⏳ review"
+    assert d.managed["w1:p1"].label == "⏳ review"
 
     probe.result = None
     d._reprobe_sweep()
@@ -433,7 +444,7 @@ def test_ci_badge_targets_working_owner_then_follows_it_to_idle():
 
     assert all(row[0] != "w1:p1" for row in client.metadata)
     assert client.reports == [
-        ("w1:p2", "working", "⏳ CI: CI"),
+        ("w1:p2", "working"),
     ]
 
 
@@ -526,7 +537,7 @@ def test_status_event_uses_repo_wide_context_for_ci_owner():
     d._on_status_event({"pane_id": "w1:p2", "agent_status": "idle"})
 
     assert client.reports == [
-        ("w1:p2", "working", "⏳ CI: CI"),
+        ("w1:p2", "working"),
     ]
 
 
@@ -671,7 +682,7 @@ def test_unverified_report_is_tracked_until_readback_confirms_hold():
     assert client.releases == []
 
     client.agents["w1:p1"].update(
-        agent_status="working", custom_status="⏳ review"
+        agent_status="working", tokens={"waiting_on": "⏳ review"}
     )
     d._reprobe_sweep()
     assert d.managed["w1:p1"].kind == "hold"
@@ -709,7 +720,7 @@ def test_unverified_report_is_confirmed_by_matching_status_event():
     seed(d, client)
     d._reprobe_sweep()
     client.agents["w1:p1"].update(
-        agent_status="working", custom_status="⏳ review"
+        agent_status="working", tokens={"waiting_on": "⏳ review"}
     )
 
     d.dispatch_event(_status_event(status="working", custom="⏳ review"))
@@ -947,13 +958,27 @@ def test_adopt_ignores_rows_without_pane_id():
         ]
     )
     assert d.managed == {}
-    assert d._legacy_release == {}
 
 
 def test_adopt_defaults_kind_to_hold():
     d = make_daemon(FakeClient([]))
-    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    d.adopt(
+        [
+            {
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "⏳ review",
+                "terminal_id": "term-w1:p1",
+            }
+        ]
+    )
     assert d.managed["w1:p1"].kind == "hold"
+
+
+def test_adopt_ignores_rows_without_terminal_identity():
+    d = make_daemon(FakeClient([]))
+    d.adopt([{"pane_id": "w1:p1", "agent": "claude", "status": "⏳ review"}])
+    assert d.managed == {}
 
 
 def test_adopted_pane_released_when_work_already_cleared():
@@ -1017,7 +1042,7 @@ def test_adopted_pending_pane_is_reasserted_once():
     )
     seed(d, client)
     d._reprobe_sweep()
-    assert client.reports == [("w1:p1", "working", "⏳ review")]
+    assert client.reports == [("w1:p1", "working")]
     d._reprobe_sweep()
     assert len(client.reports) == 1
 
@@ -1071,8 +1096,12 @@ def test_done_to_idle_hands_over_to_hold():
     client.set_agents([_agent(status="idle")])
     seed(d, client)
     d._reprobe_sweep()
-    assert client.metadata[-1] == ("w1:p1", None, True, None)
-    assert client.reports[-1] == ("w1:p1", "working", "⏳ CI: ci")
+    assert client.metadata_tokens[-1] == (
+        "w1:p1",
+        {"waiting_on": "⏳ CI: ci"},
+        1000,
+    )
+    assert client.reports[-1] == ("w1:p1", "working")
     assert d.managed["w1:p1"].kind == "hold"
 
 
@@ -1396,8 +1425,10 @@ def test_hold_pane_not_claimed_by_progress_sweep():
     d._registry["w1:p1"]["agent_status"] = "working"
     d._progress_sweep()
     assert d.managed["w1:p1"].kind == "hold"
-    assert client.metadata == []
-    assert client.reports == [("w1:p1", "working", "⏳ CI: ci")]
+    assert client.metadata_tokens == [
+        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 1000)
+    ]
+    assert client.reports == [("w1:p1", "working")]
 
 
 def test_progress_pane_recovered_when_status_drifted():
@@ -1414,11 +1445,14 @@ def test_progress_pane_recovered_when_status_drifted():
     )
     seed(d, client)
     d._reprobe_sweep()
-    assert client.metadata[-1] == ("w1:p1", None, True, None)
+    assert client.metadata_tokens == [
+        ("w1:p1", {"progress": None}, None),
+        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 1000),
+    ]
     assert d.managed["w1:p1"].kind == "hold"
 
 
-def test_adopt_hold_rows_and_legacy_rows():
+def test_adopt_only_recovers_semantic_holds():
     d = make_daemon(FakeClient([]))
     d.adopt(
         [
@@ -1434,265 +1468,15 @@ def test_adopt_hold_rows_and_legacy_rows():
                 "agent": "claude",
                 "status": "2/5 X",
                 "kind": "progress",
-            },
-            {
-                "pane_id": "w3:p1",
-                "agent": "claude",
-                "status": "3/7 Y",
-                "kind": "progress",
-                "meta": True,
+                "terminal_id": "t2",
             },
         ]
     )
+
+    assert set(d.managed) == {"w1:p1"}
     assert d.managed["w1:p1"].kind == "hold"
     assert d.managed["w1:p1"].terminal_id == "t1"
-    assert "w1:p1" in d._adopted
-    assert "w2:p1" in d._legacy_release
-    assert "w3:p1" not in d.managed
-    assert "w3:p1" not in d._legacy_release
-
-
-def test_legacy_release_retried_until_confirmed():
-    client = FakeClient([_agent(pane="w2:p1", status="idle")], release_ok=False)
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w2:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-                "terminal_id": "term-w2:p1",
-            }
-        ]
-    )
-    seed(d, client)
-    d._reprobe_sweep()
-    assert client.releases == ["w2:p1"]
-    assert "w2:p1" in d._legacy_release
-    client._release_result = "ok"
-    d._reprobe_sweep()
-    assert "w2:p1" not in d._legacy_release
-
-
-def test_legacy_cleanup_blocks_new_hold_until_release_is_confirmed():
-    legacy = _agent(status="working", term="term-w1:p1")
-    legacy["custom_status"] = "2/5 Old task"
-    client = FakeClient([legacy])
-    releases = {"count": 0}
-
-    def release(pane_id, source, agent):
-        client.releases.append(pane_id)
-        releases["count"] += 1
-        if releases["count"] == 1:
-            client.agents[pane_id].update(
-                agent_status="idle", custom_status=None
-            )
-            return "failed"  # server applied it, response was lost
-        return "ok"
-
-    client.release_agent = release
-    d = make_daemon(
-        client,
-        [StaticProbe(Pending("CI: ci", 20, "ci"))],
-        reprobe_interval_s=15,
-    )
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 Old task",
-                "kind": "progress",
-                "terminal_id": "term-w1:p1",
-            }
-        ]
-    )
-    seed(d, client)
-
-    d._reprobe_sweep()
-    d.dispatch_event(_status_event(status="idle"))
-
-    assert set(d._legacy_release) == {"w1:p1"}
-    assert d.managed == {}
-    assert client.reports == []
-
-    d._reprobe_sweep()
-
-    assert d._legacy_release == {}
-    assert d.managed["w1:p1"].kind == "hold"
-    assert client.reports == [("w1:p1", "working", "⏳ CI: ci")]
-
-
-def test_legacy_cleanup_skips_entry_remapped_during_yield():
-    client = FakeClient(
-        [
-            _agent(pane="w1:p1", status="idle", term="term-one"),
-            _agent(pane="w2:p1", status="idle", term="term-two"),
-        ]
-    )
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "1/2 First",
-                "kind": "progress",
-                "terminal_id": "term-one",
-            },
-            {
-                "pane_id": "w2:p1",
-                "agent": "claude",
-                "status": "2/2 Second",
-                "kind": "progress",
-                "terminal_id": "term-two",
-            },
-        ]
-    )
-    seed(d, client)
-    yields = {"count": 0}
-
-    def yield_control():
-        yields["count"] += 1
-        if yields["count"] == 2:
-            client.set_agents(
-                [
-                    _agent(
-                        pane="w2:p1",
-                        status="idle",
-                        agent="codex",
-                        term="term-recycled",
-                    ),
-                    _agent(
-                        pane="w3:p9",
-                        status="idle",
-                        term="term-two",
-                    ),
-                ]
-            )
-            assert d._resync() is True
-        return True
-
-    d._reprobe_sweep(yield_control)
-
-    assert client.releases == ["w1:p1"]
-    assert set(d._legacy_release) == {"w3:p9"}
-
-
-def test_legacy_cleanup_drops_foreign_session_without_release():
-    client = FakeClient([_owned_agent()])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-                "terminal_id": "term-w1:p1",
-            }
-        ]
-    )
-    seed(d, client)
-
-    d._reprobe_sweep()
-
-    assert client.releases == []
-    assert d._legacy_release == {}
-
-
-def test_legacy_cleanup_defers_release_when_pane_id_is_reused():
-    client = FakeClient([_agent(status="idle", term="term-original")])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-                "terminal_id": "term-original",
-            }
-        ]
-    )
-    seed(d, client)
-    client.set_agents([_agent(status="idle", term="term-reused")])
-
-    d._reprobe_sweep()
-
-    assert client.releases == []
-    assert d._legacy_release["w1:p1"].terminal_id == "term-original"
-    assert d._resync_due is True
-
-
-def test_shutdown_refreshes_owner_before_legacy_cleanup():
-    client = FakeClient([_agent(status="idle")])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-                "terminal_id": "term-w1:p1",
-            }
-        ]
-    )
-    seed(d, client)
-    client.set_agents([_owned_agent()])
-
-    d.shutdown()
-
-    assert client.releases == []
-    assert d._legacy_release == {}
-
-
-def test_shutdown_retains_legacy_cleanup_when_readback_is_unavailable():
-    client = FakeClient([_agent(status="idle")])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-                "terminal_id": "term-w1:p1",
-            }
-        ]
-    )
-    seed(d, client)
-    client.set_agents([])
-
-    d.shutdown()
-
-    assert client.releases == []
-    assert set(d._legacy_release) == {"w1:p1"}
-
-
-def test_shutdown_retains_legacy_cleanup_when_pane_id_is_reused():
-    client = FakeClient([_agent(status="idle", term="term-original")])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-                "terminal_id": "term-original",
-            }
-        ]
-    )
-    seed(d, client)
-    client.set_agents([_agent(status="idle", term="term-reused")])
-
-    d.shutdown()
-
-    assert client.releases == []
-    assert d._legacy_release["w1:p1"].terminal_id == "term-original"
+    assert d._adopted == {"w1:p1"}
 
 
 def test_release_gone_keeps_entry_and_schedules_resync():
@@ -1764,6 +1548,7 @@ def test_shutdown_releases_holds_and_clears_metadata():
 
 
 def _status_event(pane="w1:p1", status="idle", custom=None, agent="claude"):
+    tokens = {"waiting_on": custom} if custom is not None else {}
     return {
         "event": "pane.agent_status_changed",
         "data": {
@@ -1771,7 +1556,7 @@ def _status_event(pane="w1:p1", status="idle", custom=None, agent="claude"):
             "workspace_id": "w1",
             "agent_status": status,
             "agent": agent,
-            "custom_status": custom,
+            "tokens": tokens,
         },
     }
 
@@ -1850,7 +1635,7 @@ def test_idle_edge_event_probes_immediately():
     d._last_probe["w1:p1"] = 0.0  # stale throttle from an old probe
     client.agents["w1:p1"]["agent_status"] = "idle"
     d.dispatch_event(_status_event(status="idle"))
-    assert client.reports == [("w1:p1", "working", "⏳ review")]
+    assert client.reports == [("w1:p1", "working")]
 
 
 def test_idle_edge_marker_skips_slower_probes():
@@ -1878,7 +1663,7 @@ def test_idle_edge_marker_skips_slower_probes():
 
     d.dispatch_event(_status_event(status="idle"))
 
-    assert client.reports == [("w1:p1", "working", "⏳ deploy")]
+    assert client.reports == [("w1:p1", "working")]
     assert slow_calls == []
 
 
@@ -1914,7 +1699,7 @@ def test_fast_marker_lookup_skips_git_enrichment():
 
     d._probe_pane("w1:p1", fast=True)
 
-    assert client.reports == [("w1:p1", "working", "⏳ deploy")]
+    assert client.reports == [("w1:p1", "working")]
     assert slow_calls == []
 
 
@@ -1930,7 +1715,7 @@ def test_stale_working_event_reprobes_current_idle_state():
     d.dispatch_event(_status_event(status="working"))
 
     assert d._registry["w1:p1"]["agent_status"] == "idle"
-    assert client.reports == [("w1:p1", "working", "⏳ review")]
+    assert client.reports == [("w1:p1", "working")]
 
 
 def test_done_edge_event_labels_immediately():
@@ -1971,7 +1756,7 @@ def test_self_echo_event_is_ignored():
     assert len(client.reports) == 1
     last_probe = d._last_probe["w1:p1"]
     client.agents["w1:p1"].update(
-        agent_status="working", custom_status="⏳ review"
+        agent_status="working", tokens={"waiting_on": "⏳ review"}
     )
     d.dispatch_event(_status_event(status="working", custom="⏳ review"))
     assert len(client.reports) == 1  # echo: no re-probe, no re-assert
@@ -2007,7 +1792,7 @@ def test_foreign_session_idle_metadata_self_echo_is_ignored():
     seed(d, client)
     d._reprobe_sweep()
     last_probe = d._last_probe["w1:p1"]
-    client.agents["w1:p1"]["custom_status"] = "⏳ review"
+    client.agents["w1:p1"]["tokens"] = {"waiting_on": "⏳ review"}
 
     d.dispatch_event(_status_event(status="idle", custom="⏳ review"))
 
@@ -2030,8 +1815,11 @@ def test_progress_stop_event_hands_over_to_hold():
     probe.result = Pending("CI: ci", 20, "ci")
     client.agents["w1:p1"]["agent_status"] = "idle"
     d.dispatch_event(_status_event(status="idle"))
-    assert client.metadata[-1] == ("w1:p1", None, True, None)
-    assert client.reports[-1] == ("w1:p1", "working", "⏳ CI: ci")
+    assert client.metadata_tokens[-2:] == [
+        ("w1:p1", {"progress": None}, None),
+        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 30000),
+    ]
+    assert client.reports[-1] == ("w1:p1", "working")
     assert d.managed["w1:p1"].kind == "hold"
 
 
@@ -2078,7 +1866,7 @@ def test_malformed_pane_ids_do_not_block_following_events():
     )
     d.dispatch_event(_status_event(status="idle"))
 
-    assert client.reports == [("w1:p1", "working", "⏳ review")]
+    assert client.reports == [("w1:p1", "working")]
 
 
 def test_lifecycle_event_schedules_resync():
@@ -2270,9 +2058,9 @@ def test_pane_moved_defers_managed_target_collision_to_atomic_resync():
 
     assert d._resync() is True
     assert d.managed["w1:p1"].terminal_id == "term-b"
-    assert d.managed["w1:p1"].custom_status == "⏳ B"
+    assert d.managed["w1:p1"].label == "⏳ B"
     assert d.managed["w2:p1"].terminal_id == "term-a"
-    assert d.managed["w2:p1"].custom_status == "⏳ A"
+    assert d.managed["w2:p1"].label == "⏳ A"
     assert client.releases == []
 
 
@@ -2349,82 +2137,6 @@ def test_stale_pane_move_terminal_mismatch_defers_to_snapshot():
     assert d._resync_due is True
 
 
-def test_terminal_less_adopted_hold_ignores_unrelated_move():
-    reused = _agent(
-        pane="w1:p1", status="idle", agent="codex", term="term-reused"
-    )
-    client = FakeClient([reused])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "⏳ review",
-                "kind": "hold",
-            }
-        ]
-    )
-    seed(d, client)
-    moved = _agent(
-        pane="w2:p9", status="idle", agent="codex", term="term-reused"
-    )
-
-    d.dispatch_event(
-        {
-            "event": "pane_moved",
-            "data": {
-                "type": "pane_moved",
-                "previous_pane_id": "w1:p1",
-                "pane": moved,
-            },
-        }
-    )
-
-    assert set(d.managed) == {"w1:p1"}
-    assert set(d._registry) == {"w1:p1"}
-    assert d._resync_due is True
-
-
-def test_terminal_less_hold_is_not_poisoned_by_stale_matching_move():
-    current = _agent(
-        pane="w1:p1", status="working", agent="claude", term="term-current"
-    )
-    current["custom_status"] = "⏳ review"
-    client = FakeClient([current])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "⏳ review",
-                "kind": "hold",
-            }
-        ]
-    )
-    seed(d, client)
-    stale = _agent(
-        pane="w2:p9", status="working", agent="claude", term="term-stale"
-    )
-    stale["custom_status"] = "⏳ review"
-
-    d.dispatch_event(
-        {
-            "event": "pane_moved",
-            "data": {
-                "type": "pane_moved",
-                "previous_pane_id": "w1:p1",
-                "pane": stale,
-            },
-        }
-    )
-
-    assert d.managed["w1:p1"].terminal_id == ""
-    assert set(d._registry) == {"w1:p1"}
-    assert d._resync_due is True
-
-
 def test_malformed_pane_move_does_not_partially_remap_state():
     client = FakeClient([_agent(status="idle", term="term-original")])
     d = make_daemon(
@@ -2479,36 +2191,6 @@ def test_pane_moved_to_denied_pane_releases():
     )
     assert client.releases == ["w2:p9"]  # released under the NEW id
     assert "w2:p9" not in d.managed
-
-
-def test_pane_moved_remaps_legacy_entry():
-    client = FakeClient([], release_ok=False)
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-                "terminal_id": "term-w1:p1",
-            }
-        ]
-    )
-    moved = _agent(pane="w2:p9", status="working", term="term-w1:p1")
-    d.dispatch_event(
-        {
-            "event": "pane_moved",
-            "data": {
-                "type": "pane_moved",
-                "previous_pane_id": "w1:p1",
-                "previous_workspace_id": "w1",
-                "previous_tab_id": "w1:t1",
-                "pane": dict(moved),
-            },
-        }
-    )
-    assert "w2:p9" in d._legacy_release and "w1:p1" not in d._legacy_release
 
 
 def test_pane_moved_prefers_fresh_session_from_event():
@@ -2724,9 +2406,9 @@ def test_resync_atomically_swaps_two_tracked_pane_ids():
 
     d._resync()
 
-    assert d.managed["w1:p1"].custom_status == "⏳ B"
+    assert d.managed["w1:p1"].label == "⏳ B"
     assert d.managed["w1:p1"].terminal_id == "term-b"
-    assert d.managed["w2:p1"].custom_status == "⏳ A"
+    assert d.managed["w2:p1"].label == "⏳ A"
     assert d.managed["w2:p1"].terminal_id == "term-a"
     assert d._session_cache == {
         "w1:p1": "session-b",
@@ -2821,7 +2503,7 @@ def test_resync_logs_old_server_and_keeps_state(caplog):
     )
     with caplog.at_level("ERROR"):
         d._resync()
-    assert any("0.7.2" in r.message for r in caplog.records)
+    assert any("0.7.4" in r.message for r in caplog.records)
     assert "w1:p1" in d.managed
 
 
@@ -2843,221 +2525,6 @@ def test_resync_keeps_stream_when_pane_set_unchanged():
     d._stream = stream
     d._resync()
     assert d._stream is stream
-
-
-def test_resync_backfills_legacy_terminal_id():
-    current = _agent(status="working")
-    current["custom_status"] = "2/5 X"
-    client = FakeClient([current], release_ok=False)
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-            }
-        ]
-    )  # pre-migration row: no terminal_id
-    d._resync()
-    assert d._legacy_release["w1:p1"].terminal_id == "term-w1:p1"
-
-
-def test_resync_remaps_legacy_row_by_terminal_id():
-    client = FakeClient([_agent(status="idle")], release_ok=False)
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-                "terminal_id": "term-w1:p1",
-            }
-        ]
-    )
-    client.set_agents(
-        [_agent(pane="w2:p9", status="idle", term="term-w1:p1")]
-    )
-    d._resync()
-    assert "w2:p9" in d._legacy_release and "w1:p1" not in d._legacy_release
-
-
-def test_resync_salvages_legacy_row_by_unique_label_match():
-    # moved between old daemon's crash and our first snapshot: no terminal_id;
-    # exactly one pane carries our stored label -> remap to it
-    moved = _agent(pane="w2:p9", status="working")
-    moved["custom_status"] = "2/5 X"
-    client = FakeClient([moved], release_ok=False)
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-            }
-        ]
-    )
-    d._resync()
-    assert "w2:p9" in d._legacy_release and "w1:p1" not in d._legacy_release
-
-
-def test_resync_salvages_adopted_hold_by_unique_label_match():
-    moved = _agent(pane="w2:p9", status="working")
-    moved["custom_status"] = "⏳ review"
-    client = FakeClient([moved])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "⏳ review",
-                "kind": "hold",
-            }
-        ]
-    )
-
-    d._resync()
-
-    assert "w2:p9" in d.managed and "w1:p1" not in d.managed
-    assert "w2:p9" in d._adopted
-    assert client.releases == []
-
-
-def test_resync_salvages_terminal_less_legacy_after_pane_id_reuse():
-    reused = _agent(pane="w1:p1", status="idle", agent="codex", term="term-new")
-    moved = _agent(pane="w2:p9", status="working", term="term-old")
-    moved["custom_status"] = "2/5 X"
-    client = FakeClient([reused, moved], release_ok=False)
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-            }
-        ]
-    )
-
-    d._resync()
-
-    assert set(d._legacy_release) == {"w2:p9"}
-    assert d._legacy_release["w2:p9"].terminal_id == "term-old"
-    assert client.releases == []
-
-
-def test_resync_salvages_terminal_less_hold_after_pane_id_reuse():
-    reused = _agent(pane="w1:p1", status="idle", agent="codex", term="term-new")
-    moved = _agent(pane="w2:p9", status="working", term="term-old")
-    moved["custom_status"] = "⏳ review"
-    client = FakeClient([reused, moved])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "⏳ review",
-                "kind": "hold",
-            }
-        ]
-    )
-    d._last_probe = {"w1:p1": 1.0, "w2:p9": 2.0}
-    d._session_cache = {"w1:p1": "reused", "w2:p9": "stale-target"}
-    d._meta_asserted_at = {"w1:p1": 1.0, "w2:p9": 2.0}
-
-    d._resync()
-
-    assert set(d.managed) == {"w2:p9"}
-    assert d.managed["w2:p9"].terminal_id == "term-old"
-    assert d._adopted == {"w2:p9"}
-    assert d._last_probe == {}
-    assert d._session_cache == {}
-    assert d._meta_asserted_at == {}
-    assert client.releases == []
-
-
-def test_resync_preserves_ambiguous_terminal_less_hold():
-    reused = _agent(pane="w1:p1", status="idle", agent="codex", term="term-new")
-    moved_a = _agent(pane="w2:p1", status="working", term="term-a")
-    moved_a["custom_status"] = "⏳ review"
-    moved_b = _agent(pane="w3:p1", status="working", term="term-b")
-    moved_b["custom_status"] = "⏳ review"
-    client = FakeClient([reused, moved_a, moved_b])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "⏳ review",
-                "kind": "hold",
-            }
-        ]
-    )
-
-    d._resync()
-    d._reprobe_sweep()
-
-    assert set(d.managed) == {"w1:p1"}
-    assert d._adopted == {"w1:p1"}
-    assert d.managed["w1:p1"].terminal_id == ""
-    assert client.releases == []
-    assert client.reports == []
-    assert client.metadata == []
-    assert d._resync_due is True
-
-
-def test_resync_preserves_ambiguous_terminal_less_legacy_cleanup():
-    reused = _agent(pane="w1:p1", status="idle", agent="codex", term="term-new")
-    moved_a = _agent(pane="w2:p1", status="working", term="term-a")
-    moved_a["custom_status"] = "2/5 X"
-    moved_b = _agent(pane="w3:p1", status="working", term="term-b")
-    moved_b["custom_status"] = "2/5 X"
-    client = FakeClient([reused, moved_a, moved_b])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-            }
-        ]
-    )
-
-    d._resync()
-    d._reprobe_sweep()
-
-    assert set(d._legacy_release) == {"w1:p1"}
-    assert d._legacy_release["w1:p1"].terminal_id == ""
-    assert client.releases == []
-    assert d._resync_due is True
-
-
-def test_resync_drops_unmatchable_legacy_row():
-    client = FakeClient([_agent(pane="w3:p1", status="idle")])
-    d = make_daemon(client)
-    d.adopt(
-        [
-            {
-                "pane_id": "w1:p1",
-                "agent": "claude",
-                "status": "2/5 X",
-                "kind": "progress",
-            }
-        ]
-    )
-    d._resync()
-    assert d._legacy_release == {}  # no terminal, no label match -> gone
 
 
 def test_resync_drops_stale_session_cache():
@@ -3190,7 +2657,7 @@ def test_bootstrap_old_server_logs_and_fails(caplog):
     d = make_daemon(client, stream_factory=lambda subs: FakeStream(subs))
     with caplog.at_level("ERROR"):
         assert d.bootstrap() is False
-    assert any("0.7.2" in record.message for record in caplog.records)
+    assert any("0.7.4" in record.message for record in caplog.records)
 
 
 def test_bootstrap_reconciles_adopted_rows_before_first_sweep():
@@ -3331,7 +2798,7 @@ def test_run_loop_processes_idle_event_from_stream():
         d.run(sleep=lambda delay: None)
     except Stop:
         pass
-    assert ("w1:p1", "working", "⏳ review") in client.reports
+    assert ("w1:p1", "working") in client.reports
 
 
 def test_run_bounds_main_selector_event_read():
@@ -3381,12 +2848,8 @@ def test_run_drains_status_event_between_reprobe_panes():
     stream = FakeStream()
 
     class StopClient(FakeClient):
-        def report_agent(
-            self, pane_id, source, agent, state, custom_status=None
-        ):
-            super().report_agent(
-                pane_id, source, agent, state, custom_status
-            )
+        def report_agent(self, pane_id, source, agent, state):
+            super().report_agent(pane_id, source, agent, state)
             raise Stop()
 
     client = StopClient(
@@ -3424,7 +2887,7 @@ def test_run_drains_status_event_between_reprobe_panes():
     except Stop:
         pass
 
-    assert client.reports == [("w1:p2", "working", "⏳ marker")]
+    assert client.reports == [("w1:p2", "working")]
     assert "w1:p3" not in order
 
 
@@ -3445,13 +2908,9 @@ def test_run_rechecks_managed_hold_when_probe_sweep_outlives_interval():
         return now["value"]
 
     class TimingClient(FakeClient):
-        def report_agent(
-            self, pane_id, source, agent, state, custom_status=None
-        ):
+        def report_agent(self, pane_id, source, agent, state):
             expires_at["value"] = now["value"] + 5.0
-            return super().report_agent(
-                pane_id, source, agent, state, custom_status
-            )
+            return super().report_agent(pane_id, source, agent, state)
 
         def release_agent(self, pane_id, source, agent):
             released_at["value"] = now["value"]
@@ -3504,13 +2963,9 @@ def test_run_discovers_new_marker_before_slow_sweep_reaches_pane():
     pending = Pending("marker", 40, "marker")
 
     class StopAfterReport(FakeClient):
-        def report_agent(
-            self, pane_id, source, agent, state, custom_status=None
-        ):
+        def report_agent(self, pane_id, source, agent, state):
             reported_at["value"] = now["value"]
-            super().report_agent(
-                pane_id, source, agent, state, custom_status
-            )
+            super().report_agent(pane_id, source, agent, state)
             raise Stop()
 
     class MarkerWithSlowMisses:
@@ -3550,7 +3005,7 @@ def test_run_discovers_new_marker_before_slow_sweep_reaches_pane():
     except Stop:
         pass
 
-    assert client.reports == [("w1:p3", "working", "⏳ marker")]
+    assert client.reports == [("w1:p3", "working")]
     assert reported_at["value"] <= 15.0
 
 
@@ -3562,13 +3017,9 @@ def test_run_new_marker_bypasses_recent_unmanaged_probe_throttle():
     pending = Pending("marker", 40, "marker")
 
     class StopAfterReport(FakeClient):
-        def report_agent(
-            self, pane_id, source, agent, state, custom_status=None
-        ):
+        def report_agent(self, pane_id, source, agent, state):
             reported_at["value"] = now["value"]
-            super().report_agent(
-                pane_id, source, agent, state, custom_status
-            )
+            super().report_agent(pane_id, source, agent, state)
             raise Stop()
 
     class MarkerAppearsAfterTargetProbe:
@@ -3619,7 +3070,7 @@ def test_run_new_marker_bypasses_recent_unmanaged_probe_throttle():
     except Stop:
         pass
 
-    assert client.reports == [("w1:p1", "working", "⏳ marker")]
+    assert client.reports == [("w1:p1", "working")]
     assert reported_at["value"] - added_at["value"] <= 15.0
 
 
@@ -3720,12 +3171,8 @@ def test_run_drains_stream_between_due_managed_reprobes():
             return Pending("review", 30, "roborev")
 
     class StopAfterBothReports(FakeClient):
-        def report_agent(
-            self, pane_id, source, agent, state, custom_status=None
-        ):
-            result = super().report_agent(
-                pane_id, source, agent, state, custom_status
-            )
+        def report_agent(self, pane_id, source, agent, state):
+            result = super().report_agent(pane_id, source, agent, state)
             if len(self.reports) == 2:
                 raise Stop()
             return result
@@ -3764,8 +3211,8 @@ def test_run_drains_stream_between_due_managed_reprobes():
         pass
 
     assert client.reports == [
-        ("w1:p1", "working", "⏳ review"),
-        ("w1:p2", "working", "⏳ review"),
+        ("w1:p1", "working"),
+        ("w1:p2", "working"),
     ]
     assert checks_since_read["max"] == 1
 
@@ -3787,12 +3234,8 @@ def test_run_fast_probes_new_agent_discovered_between_panes():
     stream = BoundedStream()
 
     class StopClient(FakeClient):
-        def report_agent(
-            self, pane_id, source, agent, state, custom_status=None
-        ):
-            super().report_agent(
-                pane_id, source, agent, state, custom_status
-            )
+        def report_agent(self, pane_id, source, agent, state):
+            super().report_agent(pane_id, source, agent, state)
             raise Stop()
 
     client = StopClient(
@@ -3845,7 +3288,7 @@ def test_run_fast_probes_new_agent_discovered_between_panes():
     except Stop:
         pass
 
-    assert client.reports == [("w1:p2", "working", "⏳ marker")]
+    assert client.reports == [("w1:p2", "working")]
     assert "w1:p3" not in order
     assert stream.read_limits and all(
         limit in (0, 1) for limit in stream.read_limits
@@ -4248,7 +3691,7 @@ def test_run_rebootstraps_after_moved_event_closes_registered_stream():
         d.run(sleep=_stop_sleep)
     except Stop:
         pass
-    assert ("w2:p9", "working", "⏳ review") in client.reports
+    assert ("w2:p9", "working") in client.reports
 
 
 def test_run_caps_exponential_backoff_while_bootstrap_fails():

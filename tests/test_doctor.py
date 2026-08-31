@@ -1,13 +1,25 @@
 import json
 
-from herdwatch.doctor import Check, exit_code, format_report, run_checks, to_json
+from herdwatch.doctor import (
+    HERDR_VERSION_CHECK,
+    Check,
+    exit_code,
+    format_report,
+    run_checks,
+    to_json,
+)
 from herdwatch.herdr_socket import HerdrApiError, HerdrUnavailable
 
 
 def _base_kwargs():
+    def run(args):
+        if args[:2] == ["herdr", "--version"]:
+            return (0, "herdr 0.7.4")
+        return (0, "running")
+
     return dict(
         which=lambda cmd: True,
-        run=lambda args: (0, "running"),
+        run=run,
         list_procs=lambda: [],
         plist_path="/nonexistent",
     )
@@ -18,6 +30,8 @@ def _by_name(checks):
 
 
 def _run_all_ok(args):
+    if args[:2] == ["herdr", "--version"]:
+        return (0, "herdr 0.7.4")
     if args[:2] == ["herdr", "status"]:
         return (0, "server:\n  status: running\n")
     if args[:2] == ["gh", "auth"]:
@@ -57,6 +71,8 @@ def test_missing_herdr_fails_required():
 
 def test_optional_missing_is_warn_not_fail():
     def run(a):
+        if a[:2] == ["herdr", "--version"]:
+            return (0, "herdr 0.7.4")
         if a[:2] == ["herdr", "status"]:
             return (0, "status: running")
         return (1, "")
@@ -89,14 +105,34 @@ def test_doctor_socket_ok():
     )
     by = _by_name(checks)
     assert by["herdr socket reachable"].ok
-    assert by["herdr >= 0.7.2 (session.snapshot)"].ok
+    assert by[HERDR_VERSION_CHECK].ok
+
+
+def test_doctor_rejects_herdr_before_metadata_tokens():
+    kwargs = _base_kwargs()
+    kwargs["run"] = lambda args: (
+        (0, "herdr 0.7.3")
+        if args[:2] == ["herdr", "--version"]
+        else (0, "running")
+    )
+    by = _by_name(
+        run_checks(
+            **kwargs,
+            snapshot=lambda: {
+                "type": "session_snapshot",
+                "snapshot": {"agents": []},
+            },
+        )
+    )
+    assert not by[HERDR_VERSION_CHECK].ok
+    assert "0.7.3" in by[HERDR_VERSION_CHECK].detail
 
 
 def test_doctor_rejects_unusable_snapshot_payload():
     by = _by_name(run_checks(**_base_kwargs(), snapshot=lambda: {"agents": []}))
     assert by["herdr socket reachable"].ok
-    assert not by["herdr >= 0.7.2 (session.snapshot)"].ok
-    assert "snapshot" in by["herdr >= 0.7.2 (session.snapshot)"].detail
+    assert not by[HERDR_VERSION_CHECK].ok
+    assert "snapshot" in by[HERDR_VERSION_CHECK].detail
 
 
 def test_doctor_socket_unreachable():
@@ -106,7 +142,7 @@ def test_doctor_socket_unreachable():
     by = _by_name(run_checks(**_base_kwargs(), snapshot=snap))
     assert not by["herdr socket reachable"].ok
     assert by["herdr socket reachable"].required
-    assert not by["herdr >= 0.7.2 (session.snapshot)"].ok
+    assert not by[HERDR_VERSION_CHECK].ok
 
 
 def test_doctor_old_server():
@@ -115,8 +151,8 @@ def test_doctor_old_server():
 
     by = _by_name(run_checks(**_base_kwargs(), snapshot=snap))
     assert by["herdr socket reachable"].ok
-    assert not by["herdr >= 0.7.2 (session.snapshot)"].ok
-    assert "0.7.2" in by["herdr >= 0.7.2 (session.snapshot)"].detail
+    assert not by[HERDR_VERSION_CHECK].ok
+    assert "0.7.4" in by[HERDR_VERSION_CHECK].detail
 
 
 def test_doctor_server_api_error_preserves_diagnostic():
@@ -124,9 +160,9 @@ def test_doctor_server_api_error_preserves_diagnostic():
         raise HerdrApiError("internal_error", "snapshot unavailable")
 
     by = _by_name(run_checks(**_base_kwargs(), snapshot=snap))
-    detail = by["herdr >= 0.7.2 (session.snapshot)"].detail
+    detail = by[HERDR_VERSION_CHECK].detail
     assert by["herdr socket reachable"].ok
-    assert not by["herdr >= 0.7.2 (session.snapshot)"].ok
+    assert not by[HERDR_VERSION_CHECK].ok
     assert "internal_error" in detail
     assert "snapshot unavailable" in detail
     assert "herdr update" not in detail

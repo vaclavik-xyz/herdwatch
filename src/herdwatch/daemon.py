@@ -35,7 +35,7 @@ GLOBAL_SUBSCRIPTIONS = [
     {"type": "workspace.closed"},
     {"type": "tab.closed"},
 ]
-# Herdr 0.7.3 starts generic event cursors at zero and emits at most one
+# Herdr starts generic event cursors at zero and emits at most one
 # retained event of each type per 100 ms loop. pane.agent_detected is noisy
 # enough to replay for tens of seconds and then trip the server's macOS EAGAIN
 # bug, repeatedly destroying the status stream. Subscribing to status changes
@@ -64,16 +64,31 @@ LIFECYCLE_RESYNC_DEBOUNCE_S = 0.25
 STARTUP_REPLAY_QUIET_S = 0.25
 STARTUP_REPLAY_MAX_S = 55.0
 SEMANTIC_HOLD_KINDS = {"hold", "hold-pending"}
+PROGRESS_KINDS = {"progress", "active-meta"}
+WAITING_TOKEN = "waiting_on"
+PROGRESS_TOKEN = "progress"
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class ManagedPane:
-    custom_status: str
+    label: str
     agent: str
     # "hold" | "hold-pending" | "idle-meta" | "active-meta" | "progress" | "done"
     kind: str = "hold"
     terminal_id: str = ""
+
+    @property
+    def token_key(self) -> str:
+        return PROGRESS_TOKEN if self.kind in PROGRESS_KINDS else WAITING_TOKEN
+
+
+def _record_token(record: dict, key: str) -> str:
+    tokens = record.get("tokens")
+    if not isinstance(tokens, dict):
+        return ""
+    value = tokens.get(key)
+    return value if isinstance(value, str) else ""
 
 
 class Daemon:
@@ -114,8 +129,6 @@ class Daemon:
         self._startup_replay_quiet = startup_replay_quiet_s
         self._startup_replay_max = startup_replay_max_s
         self.managed: dict[str, ManagedPane] = {}
-        # Pre-migration semantic assertions awaiting release (see adopt).
-        self._legacy_release: dict[str, ManagedPane] = {}
         # Last known agent records, keyed by pane_id (snapshot is truth).
         self._registry: dict[str, dict] = {}
         self._subscribed_pane_ids: set[str] = set()
@@ -206,23 +219,12 @@ class Daemon:
             {
                 "pane_id": pane_id,
                 "agent": mp.agent,
-                "status": mp.custom_status,
+                "status": mp.label,
                 "kind": mp.kind,
                 "terminal_id": mp.terminal_id,
                 "meta": mp.kind not in SEMANTIC_HOLD_KINDS,
             }
             for pane_id, mp in sorted(self.managed.items())
-        ]
-        rows += [
-            {
-                "pane_id": pane_id,
-                "agent": mp.agent,
-                "status": mp.custom_status,
-                "kind": mp.kind,
-                "terminal_id": mp.terminal_id,
-                "meta": False,
-            }
-            for pane_id, mp in sorted(self._legacy_release.items())
         ]
         return rows
 
@@ -235,26 +237,23 @@ class Daemon:
     def adopt(self, rows: list[dict]) -> None:
         """Recover state from a prior run.
 
-        Hold rows are re-adopted and force one re-assert. Metadata rows from
-        this daemon generation are skipped because their TTL self-cleans.
-        Non-hold rows without the flag are pre-migration semantic assertions
-        and stay in a retry set until release_agent confirms cleanup.
+        Hold rows are re-adopted and force one re-assert. Metadata rows are
+        skipped because their TTL self-cleans.
         """
         for row in rows:
             pane_id = row.get("pane_id")
-            if not pane_id:
+            terminal_id = row.get("terminal_id", "")
+            if not pane_id or not terminal_id:
                 continue
             mp = ManagedPane(
                 row.get("status", ""),
                 row.get("agent", "agent"),
                 kind=row.get("kind", "hold"),
-                terminal_id=row.get("terminal_id", ""),
+                terminal_id=terminal_id,
             )
             if mp.kind in SEMANTIC_HOLD_KINDS:
                 self.managed[pane_id] = mp
                 self._adopted.add(pane_id)
-            elif not row.get("meta"):
-                self._legacy_release[pane_id] = mp
 
     # ---------- bootstrap ----------
 
@@ -318,7 +317,7 @@ class Daemon:
                 pane_ids = self._snapshot_pane_ids(snapshot)
             except HerdrApiError as exc:
                 self._log_boot_failure(
-                    "herdwatch requires herdr >= 0.7.2 with "
+                    "herdwatch requires herdr >= 0.7.4 with "
                     f"session.snapshot (server said: {exc})",
                     error=True,
                 )
@@ -358,7 +357,6 @@ class Daemon:
                 for pane_id, record in records.items()
                 if record.get("terminal_id")
             }
-            self._backfill_legacy_terminals(records)
             self._reconcile_books(records, by_terminal)
             for record in records.values():
                 self._remember_record(record)
@@ -389,7 +387,7 @@ class Daemon:
     ) -> tuple[str, int]:
         """Drain retained subscription events before running slow probes.
 
-        Herdr 0.7.3 replays retained events to every new subscriber. Processing
+        Herdr replays retained events to every new subscriber. Processing
         those events individually is both stale and slow enough to fill the
         socket while probes are running. Drain until the stream has been quiet,
         then let one authoritative snapshot reconcile all startup changes.
@@ -474,7 +472,7 @@ class Daemon:
         if rec is None:
             self._schedule_resync(debounce=False)  # unknown pane: topology drifted
             return
-        # Herdr 0.7.3 replays retained subscription events. Snapshot/readback
+        # Herdr replays retained subscription events. Snapshot/readback
         # is truth: a stale working event must not suppress a hold for a pane
         # that is currently idle (and a stale idle event must not claim one
         # that is currently working).
@@ -512,19 +510,13 @@ class Daemon:
                 "done": "done",
                 "idle-meta": "idle",
             }.get(mp.kind, "working")
-            event_matches = (
-                event_status == expected
-                and (data.get("custom_status") or "") == mp.custom_status
-                and (
-                    mp.kind != "hold-pending"
-                    or data.get("agent") == mp.agent
-                )
+            event_matches = event_status == expected and (
+                mp.kind != "hold-pending" or data.get("agent") == mp.agent
             )
             observed_matches = (
                 status == expected
                 and observed.get("agent") == mp.agent
-                and (observed.get("custom_status") or "")
-                == mp.custom_status
+                and _record_token(observed, mp.token_key) == mp.label
             )
             if event_matches and observed_matches:
                 if mp.kind == "hold-pending":
@@ -585,7 +577,7 @@ class Daemon:
             self._schedule_resync(debounce=False)
             return
         terminal_id = pane.get("terminal_id")
-        target_tracked = self.managed.get(new) or self._legacy_release.get(new)
+        target_tracked = self.managed.get(new)
         if target_tracked is not None and (
             not terminal_id
             or not target_tracked.terminal_id
@@ -597,7 +589,7 @@ class Daemon:
             return
         old_record = self._registry.get(old)
         new_record = self._registry.get(new)
-        tracked = self.managed.get(old) or self._legacy_release.get(old)
+        tracked = self.managed.get(old)
         terminal_less_tracked = tracked is not None and not tracked.terminal_id
         if terminal_less_tracked:
             if (
@@ -674,8 +666,6 @@ class Daemon:
         if old in self._adopted:
             self._adopted.discard(old)
             self._adopted.add(new)
-        if old in self._legacy_release:
-            self._legacy_release[new] = self._legacy_release.pop(old)
         mp = self.managed.get(new)
         if mp is not None and not self._eligible(new):
             if mp.kind in SEMANTIC_HOLD_KINDS:
@@ -684,33 +674,19 @@ class Daemon:
                 self._clear_metadata(new, "moved to ineligible pane")
         self._publish()
 
-    def _backfill_legacy_terminals(self, records: dict[str, dict]) -> None:
-        """Legacy rows predate terminal_id persistence; grab it from the
-        first snapshot that still shows the pane, so later moves remap."""
-        for pane_id, mp in self._legacy_release.items():
-            current = records.get(pane_id)
-            if (
-                not mp.terminal_id
-                and current is not None
-                and self._record_matches_label(current, mp)
-            ):
-                mp.terminal_id = current.get("terminal_id") or ""
-
     def _apply_terminal_moves(
         self,
         records: dict[str, dict],
         by_terminal: dict[str, str],
     ) -> None:
         """Apply direct terminal-id remaps atomically, including swaps."""
-        books = (self.managed, self._legacy_release)
-        candidates: dict[tuple[int, str], str] = {}
-        for book_index, book in enumerate(books):
-            for pane_id, mp in book.items():
-                if not mp.terminal_id:
-                    continue
-                new_id = by_terminal.get(mp.terminal_id)
-                if new_id and new_id != pane_id:
-                    candidates[(book_index, pane_id)] = new_id
+        candidates: dict[str, str] = {}
+        for pane_id, mp in self.managed.items():
+            if not mp.terminal_id:
+                continue
+            new_id = by_terminal.get(mp.terminal_id)
+            if new_id and new_id != pane_id:
+                candidates[pane_id] = new_id
         if not candidates:
             return
 
@@ -726,11 +702,8 @@ class Daemon:
             blocked = {
                 source
                 for source in safe
-                if any(
-                    (book_index, candidates[source]) not in safe
-                    for book_index, book in enumerate(books)
-                    if candidates[source] in book
-                )
+                if candidates[source] in self.managed
+                and candidates[source] not in safe
             }
             if not blocked:
                 break
@@ -738,16 +711,8 @@ class Daemon:
         if not safe:
             return
 
-        rows = {
-            source: books[source[0]].pop(source[1]) for source in safe
-        }
-        public_moves = {
-            source[1]: candidates[source]
-            for source in safe
-        }
-        source_counts: dict[str, int] = {}
-        for _, pane_id in safe:
-            source_counts[pane_id] = source_counts.get(pane_id, 0) + 1
+        rows = {source: self.managed.pop(source) for source in safe}
+        public_moves = {source: candidates[source] for source in safe}
         for mapping in (
             self._last_probe,
             self._session_cache,
@@ -757,7 +722,7 @@ class Daemon:
             captured = {
                 old: mapping[old]
                 for old in public_moves
-                if source_counts[old] == 1 and old in mapping
+                if old in mapping
             }
             for pane_id in set(public_moves) | set(public_moves.values()):
                 mapping.pop(pane_id, None)
@@ -765,21 +730,18 @@ class Daemon:
                 mapping[public_moves[old]] = value
 
         adopted = {
-            pane_id
-            for book_index, pane_id in safe
-            if book_index == 0 and pane_id in self._adopted
+            pane_id for pane_id in safe if pane_id in self._adopted
         }
-        for _, pane_id in safe:
+        for pane_id in safe:
             self._adopted.discard(pane_id)
-        moved_managed_targets = []
+        moved_managed_targets: list[str] = []
         for source, mp in rows.items():
             target = candidates[source]
-            books[source[0]][target] = mp
-            if source[0] == 0:
-                moved_managed_targets.append(target)
-            if source[0] == 0 and source[1] in adopted:
+            self.managed[target] = mp
+            moved_managed_targets.append(target)
+            if source in adopted:
                 self._adopted.add(target)
-            log.info("remapped %s -> %s by terminal id", source[1], target)
+            log.info("remapped %s -> %s by terminal id", source, target)
         for pane_id in moved_managed_targets:
             current = records.get(pane_id)
             if current is not None:
@@ -796,122 +758,52 @@ class Daemon:
     def _reconcile_books(
         self, records: dict[str, dict], by_terminal: dict[str, str]
     ) -> None:
-        """Move reconciliation + vanish handling for managed and legacy rows
-        against snapshot truth. Shared by _resync and bootstrap (so adopted
+        """Move reconciliation + vanish handling for managed rows against
+        snapshot truth. Shared by _resync and bootstrap (so adopted
         rows are reconciled BEFORE the first sweep can release stale ids)."""
         self._apply_terminal_moves(records, by_terminal)
-        for book in (self.managed, self._legacy_release):
-            for pane_id in list(book):
-                mp = book[pane_id]
-                current = records.get(pane_id)
-                recover_by_label = not mp.terminal_id and (
-                    book is self._legacy_release
-                    or (
-                        book is self.managed
-                        and pane_id in self._adopted
-                        and mp.kind in SEMANTIC_HOLD_KINDS
-                    )
+        for pane_id in list(self.managed):
+            mp = self.managed[pane_id]
+            current = records.get(pane_id)
+            reused_pane_id = current is not None and (
+                not mp.terminal_id
+                or (current.get("terminal_id") or "") != mp.terminal_id
+            )
+            if current is not None and not reused_pane_id:
+                continue
+            new_id = by_terminal.get(mp.terminal_id) if mp.terminal_id else None
+            if new_id and new_id not in self.managed:
+                self._remap(pane_id, new_id, records.get(new_id))
+                continue
+            del self.managed[pane_id]
+            for mapping in (
+                self._last_probe,
+                self._session_cache,
+                self._meta_asserted_at,
+                self._record_terminal_ids,
+            ):
+                mapping.pop(pane_id, None)
+            self._adopted.discard(pane_id)
+            if reused_pane_id:
+                log.warning(
+                    "dropped stale %s for reused pane id %s",
+                    mp.kind,
+                    pane_id,
                 )
-                current_matches_label = (
-                    current is not None
-                    and self._record_matches_label(current, mp)
+                continue
+            # Best-effort cleanup; the pane is gone, drop regardless.
+            if mp.kind in SEMANTIC_HOLD_KINDS:
+                self._client.release_agent(pane_id, SOURCE, mp.agent)
+            else:
+                self._client.report_metadata(
+                    pane_id,
+                    SOURCE,
+                    tokens={mp.token_key: None},
                 )
-                if recover_by_label and current_matches_label:
-                    mp.terminal_id = current.get("terminal_id") or ""
-                    continue
-                reused_pane_id = (
-                    current is not None
-                    and (
-                        (
-                            bool(mp.terminal_id)
-                            and (current.get("terminal_id") or "")
-                            != mp.terminal_id
-                        )
-                        or (recover_by_label and not current_matches_label)
-                    )
-                )
-                if current is not None and not reused_pane_id:
-                    continue
-                new_id = (
-                    by_terminal.get(mp.terminal_id) if mp.terminal_id else None
-                )
-                label_remap = False
-                if (
-                    new_id is None
-                    and recover_by_label
-                ):
-                    # A pre-migration row can move before the first snapshot
-                    # and has no terminal_id. Salvage legacy cleanup rows and
-                    # adopted holds only; runtime-managed rows must never be
-                    # remapped by a label guess. A unique match among
-                    # untracked panes is safe: a mismatch either has no
-                    # herdwatch assertion or carries an orphan from our source.
-                    matches = [
-                        pid
-                        for pid, a in records.items()
-                        if pid not in self.managed
-                        and pid not in self._legacy_release
-                        and (a.get("agent") or "") == mp.agent
-                        and (a.get("custom_status") or "") == mp.custom_status
-                    ]
-                    if len(matches) == 1:
-                        new_id = matches[0]
-                        label_remap = True
-                    elif len(matches) > 1:
-                        log.warning(
-                            "preserving ambiguous terminal-less %s at %s",
-                            mp.kind,
-                            pane_id,
-                        )
-                        continue
-                if (
-                    new_id
-                    and new_id not in self.managed
-                    and new_id not in self._legacy_release
-                ):
-                    target = records.get(new_id)
-                    if not mp.terminal_id and target is not None:
-                        mp.terminal_id = target.get("terminal_id") or ""
-                    self._remap(
-                        pane_id,
-                        new_id,
-                        records.get(new_id),
-                        preserve_cache=not label_remap,
-                    )
-                    continue
-                del book[pane_id]
-                if reused_pane_id:
-                    for mapping in (
-                        self._last_probe,
-                        self._session_cache,
-                        self._meta_asserted_at,
-                        self._record_terminal_ids,
-                    ):
-                        mapping.pop(pane_id, None)
-                    if book is self.managed:
-                        self._adopted.discard(pane_id)
-                    log.warning(
-                        "dropped stale %s for reused pane id %s",
-                        mp.kind,
-                        pane_id,
-                    )
-                    continue
-                if book is self.managed:
-                    self._adopted.discard(pane_id)
-                    # best-effort cleanup; the pane is gone, drop regardless
-                    if mp.kind in SEMANTIC_HOLD_KINDS:
-                        self._client.release_agent(pane_id, SOURCE, mp.agent)
-                    else:
-                        self._client.report_metadata(
-                            pane_id,
-                            SOURCE,
-                            agent=mp.agent,
-                            clear_custom_status=True,
-                        )
-                    log.info("dropped vanished pane %s (%s)", pane_id, mp.kind)
+            log.info("dropped vanished pane %s (%s)", pane_id, mp.kind)
 
     def _resync(self) -> bool:
-        """Snapshot is truth: reconcile managed/legacy/registry against it.
+        """Snapshot is truth: reconcile managed state and registry against it.
         Never raises; herdr being down keeps all state for a later retry."""
         self._resync_due = False
         self._resync_not_before = None
@@ -922,7 +814,7 @@ class Daemon:
         except HerdrApiError as exc:
             if exc.code == "unknown_method":
                 log.error(
-                    "herdwatch requires herdr >= 0.7.2 with "
+                    "herdwatch requires herdr >= 0.7.4 with "
                     "session.snapshot (server said: %s)",
                     exc,
                 )
@@ -939,7 +831,6 @@ class Daemon:
             for pid, a in records.items()
             if a.get("terminal_id")
         }
-        self._backfill_legacy_terminals(records)
         self._reconcile_books(records, by_terminal)
         self._registry = records
         for rec in records.values():
@@ -975,7 +866,7 @@ class Daemon:
     def _foreign_session_owner(self, pane_id: str) -> str | None:
         """Return a session owner that herdwatch must not displace.
 
-        Herdr 0.7.3 rejects a custom lifecycle authority while an official
+        Herdr rejects a custom lifecycle authority while an official
         integration owns the pane session, but still answers `ok`. More
         importantly, releasing our rejected source can clear the official
         pane detection. Treat such panes as metadata-only.
@@ -992,7 +883,7 @@ class Daemon:
     def _record_matches_label(rec: dict, mp: ManagedPane) -> bool:
         return (
             (rec.get("agent") or "") == mp.agent
-            and (rec.get("custom_status") or "") == mp.custom_status
+            and _record_token(rec, mp.token_key) == mp.label
         )
 
     @staticmethod
@@ -1000,7 +891,7 @@ class Daemon:
         return (
             rec.get("agent") == mp.agent
             and rec.get("agent_status") == "working"
-            and rec.get("custom_status") == mp.custom_status
+            and _record_token(rec, WAITING_TOKEN) == mp.label
         )
 
     @staticmethod
@@ -1021,9 +912,21 @@ class Daemon:
             self._assert_metadata(pane_id, agent, label, "idle-meta")
             return
         previous = self.managed.get(pane_id)
-        outcome = self._client.report_agent(
-            pane_id, SOURCE, agent, "working", label
+        outcome = self._client.report_agent(pane_id, SOURCE, agent, "working")
+        if outcome is False:
+            self._last_probe.pop(pane_id, None)
+            return
+        token_written = self._client.report_metadata(
+            pane_id,
+            SOURCE,
+            tokens={WAITING_TOKEN: label},
+            ttl_ms=self._ttl_ms("hold"),
         )
+        if not token_written:
+            if outcome is True:
+                self._client.release_agent(pane_id, SOURCE, agent)
+            self._last_probe.pop(pane_id, None)
+            return
         if outcome is True:
             self.managed[pane_id] = ManagedPane(
                 label,
@@ -1051,18 +954,15 @@ class Daemon:
                 log.warning(
                     "hold %s is awaiting readback verification", pane_id
                 )
-        else:
-            # Do not record a failed write, and let the next sweep retry now.
-            self._last_probe.pop(pane_id, None)
 
     def _assert_metadata(
         self, pane_id: str, agent: str, label: str, kind: str
     ) -> None:
+        token_key = PROGRESS_TOKEN if kind in PROGRESS_KINDS else WAITING_TOKEN
         if self._client.report_metadata(
             pane_id,
             SOURCE,
-            agent=agent,
-            custom_status=label,
+            tokens={token_key: label},
             ttl_ms=self._ttl_ms(kind),
         ):
             self.managed[pane_id] = ManagedPane(
@@ -1125,11 +1025,20 @@ class Daemon:
                 )
                 return True
             mp.kind = "hold"
+        if not self._client.report_metadata(
+            pane_id, SOURCE, tokens={WAITING_TOKEN: None}
+        ):
+            self._last_probe.pop(pane_id, None)
+            log.warning(
+                "cannot clear waiting token for %s (%s); keeping to retry",
+                pane_id,
+                reason,
+            )
+            return False
         owner = self._foreign_session_owner(pane_id)
         if owner is not None:
-            # A visible foreign session proves our custom source is not the
-            # effective authority under herdr 0.7.3. Releasing the unmatched
-            # source can clear the official detection, so only forget the row.
+            # A visible foreign session proves our source is not the effective
+            # authority. Do not risk releasing the official integration.
             del self.managed[pane_id]
             self._adopted.discard(pane_id)
             log.warning(
@@ -1166,7 +1075,7 @@ class Daemon:
         if mp is None:
             return True
         if self._client.report_metadata(
-            pane_id, SOURCE, agent=mp.agent, clear_custom_status=True
+            pane_id, SOURCE, tokens={mp.token_key: None}
         ):
             del self.managed[pane_id]
             self._meta_asserted_at.pop(pane_id, None)
@@ -1221,7 +1130,11 @@ class Daemon:
                 status=rec.get("agent_status") or "unknown",
                 head_sha=gi.head_sha,
                 branch=gi.branch,
-                custom_status=rec.get("custom_status"),
+                progress=(
+                    _record_token(rec, PROGRESS_TOKEN)
+                    or _record_token(rec, WAITING_TOKEN)
+                    or None
+                ),
                 herdwatch_hold=(
                     pane_id in self.managed
                     and self.managed[pane_id].kind in SEMANTIC_HOLD_KINDS
@@ -1310,11 +1223,6 @@ class Daemon:
     ) -> bool:
         """Make the per-pane decision from the current registry record."""
         if not self._eligible(pane_id):
-            return False
-        if pane_id in self._legacy_release:
-            # Never overlap a new semantic assertion with an unconfirmed
-            # pre-migration cleanup for the same source and pane.
-            self._last_probe.pop(pane_id, None)
             return False
         now = self._clock()
         last = self._last_probe.get(pane_id)
@@ -1409,7 +1317,7 @@ class Daemon:
                         self._clock()
                         - self._meta_asserted_at.get(pane_id, 0.0)
                     ) >= self._ttl_ms("active-meta") / 2000.0
-                    if mp.custom_status != working_label or stale:
+                    if mp.label != working_label or stale:
                         self._assert_metadata(
                             pane_id,
                             agent_name,
@@ -1431,7 +1339,7 @@ class Daemon:
             if label:
                 if (
                     self._foreign_session_owner(pane_id) is not None
-                    or mp.custom_status != label
+                    or mp.label != label
                     or pane_id in self._adopted
                 ):
                     self._assert_hold(pane_id, agent_name, label)
@@ -1505,79 +1413,6 @@ class Daemon:
         if not yield_now():
             self._publish()
             return
-        for pane_id, mp in list(self._legacy_release.items()):
-            if self._legacy_release.get(pane_id) is not mp:
-                if not yield_now():
-                    self._publish()
-                    return
-                continue
-            observed = self._readback_record(pane_id)
-            if observed is None:
-                log.warning(
-                    "cannot verify legacy cleanup %s; keeping it to retry",
-                    pane_id,
-                )
-                if not yield_now():
-                    self._publish()
-                    return
-                continue
-            if not mp.terminal_id:
-                terminal_id = observed.get("terminal_id") or ""
-                if not terminal_id or not self._record_matches_label(
-                    observed, mp
-                ):
-                    self._schedule_resync(debounce=False)
-                    log.warning(
-                        "cannot establish legacy cleanup %s terminal identity; "
-                        "keeping it to retry",
-                        pane_id,
-                    )
-                    if not yield_now():
-                        self._publish()
-                        return
-                    continue
-                mp.terminal_id = terminal_id
-            if mp.terminal_id and not self._record_matches_terminal(
-                observed, mp
-            ):
-                self._schedule_resync(debounce=False)
-                log.warning(
-                    "cannot verify legacy cleanup %s terminal identity; "
-                    "keeping it to retry",
-                    pane_id,
-                )
-                if not yield_now():
-                    self._publish()
-                    return
-                continue
-            owner = self._foreign_session_owner(pane_id)
-            if owner is not None:
-                del self._legacy_release[pane_id]
-                self._last_probe.pop(pane_id, None)
-                log.warning(
-                    "dropping legacy cleanup %s without release; session "
-                    "belongs to %s",
-                    pane_id,
-                    owner,
-                )
-                if not yield_now():
-                    self._publish()
-                    return
-                continue
-            outcome = self._client.release_agent(pane_id, SOURCE, mp.agent)
-            if outcome == "ok":
-                del self._legacy_release[pane_id]
-                self._last_probe.pop(pane_id, None)
-                # Refresh the post-release status so the registry phase later
-                # in this same sweep can immediately consider pending work.
-                self._readback_record(pane_id)
-                log.info("released legacy assertion on %s", pane_id)
-            elif outcome == "gone":
-                self._schedule_resync(debounce=False)
-            if not yield_now():
-                self._publish()
-                return
-
         contexts = self._contexts()
         for pane_id in list(self.managed):
             mp = self.managed.get(pane_id)
@@ -1650,7 +1485,7 @@ class Daemon:
                 if (
                     mp is None
                     or mp.kind != "progress"
-                    or mp.custom_status != label
+                    or mp.label != label
                     or stale
                 ):
                     self._assert_metadata(
@@ -1678,8 +1513,7 @@ class Daemon:
                     self._client.report_metadata(
                         pane_id,
                         SOURCE,
-                        agent=mp.agent,
-                        clear_custom_status=True,
+                        tokens={mp.token_key: None},
                     )
                     del self.managed[pane_id]
             except Exception:
@@ -1687,38 +1521,6 @@ class Daemon:
                     "failed to clean %s on shutdown", pane_id, exc_info=True
                 )
 
-        for pane_id, mp in list(self._legacy_release.items()):
-            try:
-                observed = self._readback_record(pane_id)
-                if observed is None:
-                    log.warning(
-                        "cannot verify legacy cleanup %s on shutdown; "
-                        "keeping it to retry",
-                        pane_id,
-                    )
-                    continue
-                if not self._record_matches_terminal(observed, mp):
-                    log.warning(
-                        "cannot verify legacy cleanup %s terminal identity; "
-                        "keeping it to retry",
-                        pane_id,
-                    )
-                    continue
-                owner = self._foreign_session_owner(pane_id)
-                if owner is not None:
-                    del self._legacy_release[pane_id]
-                    continue
-                if (
-                    self._client.release_agent(pane_id, SOURCE, mp.agent)
-                    == "ok"
-                ):
-                    del self._legacy_release[pane_id]
-            except Exception:
-                log.warning(
-                    "failed to release legacy %s on shutdown",
-                    pane_id,
-                    exc_info=True,
-                )
         self._publish()
 
     def run(self, sleep: Callable[[float], None] = time.sleep) -> None:
