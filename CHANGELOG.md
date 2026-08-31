@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 - 2026-08-31
+
+### Added
+
+- Build a wheel and source distribution for every published GitHub release.
+- Publish releases to PyPI through GitHub's short-lived OIDC identity, without
+  storing a long-lived PyPI token.
+- Attach both Python distributions to the matching GitHub release.
+- Verify that the release tag, Python package, and Herdr plugin versions agree.
+
 ## 0.2.0 - 2026-08-31
 
 ### Changed

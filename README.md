@@ -87,7 +87,13 @@ enabled = true
 
 ## Install & run
 
-**From source (recommended for now):**
+**With pipx:**
+
+    pipx install herdwatch
+    herdwatch doctor
+    herdwatch daemon
+
+**From source:**
 
     git clone https://github.com/vaclavik-xyz/herdwatch && cd herdwatch
     python3 -m venv .venv && .venv/bin/pip install .
