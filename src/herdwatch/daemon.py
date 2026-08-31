@@ -1352,7 +1352,8 @@ class Daemon:
         if mp is not None and mp.kind == "hold":
             if label:
                 if (
-                    self._foreign_session_owner(pane_id) is not None
+                    not self._semantic_holds
+                    or self._foreign_session_owner(pane_id) is not None
                     or mp.label != label
                     or pane_id in self._adopted
                 ):

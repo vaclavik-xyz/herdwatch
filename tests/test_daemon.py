@@ -234,7 +234,6 @@ def test_metadata_only_mode_releases_an_adopted_legacy_hold():
             "kind": "hold",
         }]
     )
-    client.agents["w1:p1"]["agent_status"] = "idle"
     seed(d, client)
 
     d._reprobe_sweep()
