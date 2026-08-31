@@ -5,7 +5,7 @@
 # See https://herdr.dev/docs/plugins/
 id = "herdwatch"
 name = "herdwatch"
-version = "0.2.0"
+version = "0.2.1"
 min_herdr_version = "0.7.4"
 description = "Label panes as waiting while background work (CI, review, jobs) remains pending after the agent goes idle."
 platforms = ["macos", "linux"]
