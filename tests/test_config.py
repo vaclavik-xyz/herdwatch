@@ -80,22 +80,40 @@ def test_panes_allow_deny_and_reprobe_interval_are_loaded(tmp_path):
     assert cfg.deny == ["w2:p2"]
 
 
-def test_progress_enabled_default_true(tmp_path):
+def test_progress_enabled_default_false(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text("")
-    assert load(str(p)).progress_enabled is True
-
-
-def test_progress_can_be_disabled(tmp_path):
-    p = tmp_path / "c.toml"
-    p.write_text("[progress]\nenabled = false\n")
     assert load(str(p)).progress_enabled is False
+
+
+def test_progress_can_be_enabled(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text("[progress]\nenabled = true\n")
+    assert load(str(p)).progress_enabled is True
 
 
 def test_progress_ignores_non_bool(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text("[progress]\nenabled = 'yes'\n")
-    assert load(str(p)).progress_enabled is True
+    assert load(str(p)).progress_enabled is False
+
+
+def test_semantic_holds_default_false(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text("")
+    assert load(str(p)).semantic_holds_enabled is False
+
+
+def test_semantic_holds_are_explicitly_opt_in(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text("[lifecycle]\nsemantic_holds = true\n")
+    assert load(str(p)).semantic_holds_enabled is True
+
+
+def test_semantic_holds_ignore_non_bool(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text("[lifecycle]\nsemantic_holds = 'yes'\n")
+    assert load(str(p)).semantic_holds_enabled is False
 
 
 def test_new_interval_defaults():

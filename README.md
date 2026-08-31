@@ -17,9 +17,9 @@ finished isn't, and you can't trust the sidebar at a glance.
 
 herdwatch fixes that: while background work is still pending after an agent goes
 idle, it adds a `⏳` label saying what it is waiting on (CI, roborev review, a
-manual marker, or — opt-in — a background job). When herdr permits a custom
-lifecycle authority, herdwatch also keeps the pane shown as **working** and
-releases it the moment the work clears.
+manual marker, or — opt-in — a background job). The label is TTL-backed display
+metadata: herdr and its official integrations remain the sole owners of the
+pane's real lifecycle state, while Herdeck derives `WAITING` from `waiting_on`.
 
 > **Setting this up via a coding agent?** Point it at [AGENTS.md](AGENTS.md) — a
 > runbook it can follow to install, enable, and verify herdwatch on your machine.
@@ -30,13 +30,11 @@ herdwatch is a standalone background daemon — **not** a herdr fork and not a
 screen-scraper. It requires **herdr ≥ 0.7.4** and talks directly to herdr's
 socket API. It bootstraps from `session.snapshot`, subscribes to herdr's socket
 events (`pane.agent_status_changed` for every pane plus lifecycle events),
-reacts to idle/done edges within ~100 ms, and re-verifies against a fresh snapshot every
-`resync_interval_s` (60 s by default), so correctness never depends on seeing
-every event. Retained lifecycle-event replays are coalesced before that snapshot,
-so the subscription stays drained. For idle panes, herdwatch runs a set of
-probes; while any probe is pending it requests `working` through
-`pane.report_agent`, verifies the applied lifecycle state, and publishes the
-description as the `waiting_on` metadata token. No per-agent setup is needed.
+reacts to idle/done edges promptly, and re-verifies against a fresh snapshot
+every `resync_interval_s` (60 s by default), so correctness never depends on
+seeing every event. For idle and done panes, herdwatch runs a set of probes; while
+any probe is pending it publishes the description as the `waiting_on` metadata
+token. No per-agent setup is needed.
 
 CI runs are assigned to one pane instead of broadcast to every pane that shares
 the repository. An exact checkout HEAD match wins; when agents operate on a
@@ -51,44 +49,40 @@ Herdwatch deliberately replaces the replay-heavy global
 currently unknown ones. The first `unknown → working` edge still triggers an
 immediate snapshot, without destabilizing status delivery for known agents.
 
-A pane herdr reports as `done` keeps that semantic state. If work is still
-pending, herdwatch adds a **display-only** `waiting_on` token via
-`pane.report_metadata`. When you view the pane and herdr
-transitions it from `done` to `idle`, herdwatch refreshes the token; if
-the work is still pending, a normal `working ⏳` hold takes over.
+A pane herdr reports as `idle` or `done` keeps that semantic state. If work is
+still pending, herdwatch adds a **display-only** `waiting_on` token via
+`pane.report_metadata`. The token has a bounded TTL and is refreshed only while
+the probe still reports pending work, so a stopped daemon cannot leave a stale
+label permanently.
 
-**The key trick** (reusable for any similar tool): when accepted, a state
-reported through `herdr pane report-agent --source <name>` is authoritative and
-durable over screen detection for as long as that source holds it. Herdr
-can silently reject that request when an official integration already owns the
-pane session while still returning `ok`. Herdwatch therefore verifies the
-effective state. On such a session-owned pane it uses TTL-backed display
-metadata instead: the pane remains semantically `idle`, while the separate
-Herdeck dashboard derives `WAITING` from `waiting_on`; herdwatch never releases
-or disturbs the official owner.
+An optional compatibility mode can still request a semantic `working` hold for
+unmanaged panes. It is disabled by default because an official integration may
+own the pane session and must not be impersonated or released. When explicitly
+enabled, herdwatch verifies that Herdr applied its request and falls back to
+metadata if another source owns the session.
 
 The daemon also publishes the set of panes it is currently managing (and the
 recorded `⏳` label per pane) to a small JSON state file
 (`~/.local/state/herdwatch/managed.json`), so `herdwatch status` — a separate
-process — can show what herdwatch is holding right now. The snapshot records the
+process — can show what herdwatch is labeling right now. The snapshot records the
 daemon's pid, so `status` can tell a live snapshot from one a dead daemon left
-behind. On startup the daemon reads that file back and re-adopts those panes, so
-a crash-and-restart reconciles them (next tick re-probes → re-asserts or
-releases) instead of orphaning a `working ⏳`.
+behind. Metadata rows need no crash recovery because their TTL self-cleans.
+When upgrading from a version that persisted a semantic hold, the daemon
+re-adopts and releases that legacy assertion before switching to metadata.
 
-## Task progress in the sidebar
+## Optional task progress in the sidebar
 
-While a Claude Code agent is actively working through a task list, herdwatch
+When enabled, while a Claude Code agent is actively working through a task list, herdwatch
 shows how far along it is — `3/7 Fixing auth bug` — through the pane's
 `progress` token. It reads the session's task files (`~/.claude/tasks/`, matched via
 herdr's `agent_session` id), so no per-agent setup is needed; other agents
 are skipped. Progress is display-only metadata published through
 `pane.report_metadata`; herdr keeps detecting the real lifecycle state beneath
-it, so the label never masks `blocked` or `idle`. Disable with:
+it, so the label never masks `blocked` or `idle`. Enable with:
 
 ```toml
 [progress]
-enabled = false
+enabled = true
 ```
 
 ## Install & run
@@ -142,6 +136,9 @@ file is optional. The full set of keys:
 resync_interval_s = 60      # fresh snapshot safety-net interval
 reprobe_interval_s = 15     # min seconds between probing the same pane
 
+[lifecycle]
+semantic_holds = false      # default; true is compatibility mode for unmanaged panes
+
 [probes]
 ci = true                   # on by default: roborev, ci, marker
 roborev = true              # bgjobs is OFF by default (opt-in below)
@@ -156,7 +153,7 @@ ignore = ["vite", "webpack"]  # extra process names to treat as "not a job"
                               # (added on top of the built-in defaults)
 
 [progress]
-enabled = true               # default
+enabled = false              # opt in to Claude Code task-file progress
 interval_s = 4               # how often to refresh task progress
 
 [panes]
@@ -178,25 +175,27 @@ names to skip.
 - **Requires herdr ≥ 0.7.4.** The daemon needs socket `session.snapshot`, event
   subscriptions, and named metadata tokens. There is no fallback for older
   metadata fields; `herdwatch doctor` checks this requirement.
-- **Herdr session ownership can prevent semantic holds.** If an official
-  integration such as `herdr:claude` or `herdr:codex` owns `agent_session`,
-  herdr rejects a third-party `pane.report_agent` lifecycle authority. Herdwatch
-  fails safe and publishes only `waiting_on` for that pane. Herdeck still
-  renders it as `WAITING`. A future herdr semantic-overlay/lease API is needed to keep these panes
-  truly `working` without impersonating or clearing the official owner.
+- **Herdeck provides the semantic `WAITING` view.** Herdr itself keeps the
+  authoritative `idle`/`done` state and the `waiting_on` token beside it.
+  Herdeck renders that combination as `WAITING`. Clients that ignore named
+  metadata will see the original Herdr lifecycle state and no waiting overlay.
 - **`status` is a snapshot, not a live query.** `herdwatch status` reads the
   state file the daemon writes each sweep, so it lags reality by up to one
   sweep interval. If the daemon died uncleanly the file lingers, but `status`
   flags this by checking the recorded pid. (`socket_path` in config is reserved
   for a future live status channel and is currently unused.)
-- **Recovery depends on the state file.** On clean shutdown (SIGTERM / launchctl
-  unload) herdwatch releases every pane it manages. After an *unclean* death it
-  reconciles on restart by re-adopting the panes from
-  `~/.local/state/herdwatch/managed.json` — but if that file is deleted while the
-  daemon is down, any pane held at crash time is left showing `working ⏳` until
-  it next becomes busy-then-idle.
-- **No "step aside" while a `⏳` hold is active.** While herdwatch asserts
-  `working` for an idle pane, its own assertion masks the agent's real status,
-  so it cannot detect the human resuming genuine work mid-wait; the hold
-  persists until the background work clears. Display-only progress tokens do
-  not mask the underlying lifecycle state.
+- **Semantic holds are a compatibility option.** With
+  `[lifecycle] semantic_holds = true`, unmanaged panes regain the older
+  `working ⏳` behavior. Those durable assertions depend on the state file for
+  crash recovery and can mask the underlying lifecycle while active. Keep the
+  default metadata-only mode unless a client cannot interpret `waiting_on`.
+
+## Herdr API compatibility
+
+CI downloads the SHA-256-verified binaries from Herdr's stable and preview
+manifests, exports each binary's JSON API schema, and checks every method,
+parameter, subscription, and response field herdwatch consumes. Run the same
+check locally with:
+
+    python scripts/check_herdr_api.py --channel stable
+    python scripts/check_herdr_api.py --channel preview

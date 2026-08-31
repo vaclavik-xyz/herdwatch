@@ -106,6 +106,7 @@ class Daemon:
         deny: list[str] | None = None,
         on_snapshot: Callable[[list[dict]], None] = lambda rows: None,
         progress: Callable[[str], str | None] | None = None,
+        semantic_holds: bool = False,
         stream_factory=None,
         backoff_base_s: float = 0.5,
         backoff_max_s: float = 30.0,
@@ -123,6 +124,7 @@ class Daemon:
         self._deny = set(deny or [])
         self._on_snapshot = on_snapshot
         self._progress = progress
+        self._semantic_holds = semantic_holds
         self._stream_factory = stream_factory
         self._backoff_base = backoff_base_s
         self._backoff_max = backoff_max_s
@@ -901,6 +903,18 @@ class Daemon:
         )
 
     def _assert_hold(self, pane_id: str, agent: str, label: str) -> None:
+        if not self._semantic_holds:
+            previous = self.managed.get(pane_id)
+            if (
+                previous is not None
+                and previous.kind in SEMANTIC_HOLD_KINDS
+                and not self._release_hold(
+                    pane_id, "semantic holds disabled"
+                )
+            ):
+                return
+            self._assert_metadata(pane_id, agent, label, "idle-meta")
+            return
         owner = self._foreign_session_owner(pane_id)
         if owner is not None:
             log.warning(
@@ -1338,7 +1352,8 @@ class Daemon:
         if mp is not None and mp.kind == "hold":
             if label:
                 if (
-                    self._foreign_session_owner(pane_id) is not None
+                    not self._semantic_holds
+                    or self._foreign_session_owner(pane_id) is not None
                     or mp.label != label
                     or pane_id in self._adopted
                 ):
@@ -1350,11 +1365,19 @@ class Daemon:
 
         if mp is not None and mp.kind == "idle-meta":
             if status == "idle":
-                if self._foreign_session_owner(pane_id) is not None:
+                if (
+                    not self._semantic_holds
+                    or self._foreign_session_owner(pane_id) is not None
+                ):
                     if label:
-                        self._assert_metadata(
-                            pane_id, agent_name, label, "idle-meta"
-                        )
+                        stale = (
+                            self._clock()
+                            - self._meta_asserted_at.get(pane_id, 0.0)
+                        ) >= self._ttl_ms("idle-meta") / 2000.0
+                        if mp.label != label or stale:
+                            self._assert_metadata(
+                                pane_id, agent_name, label, "idle-meta"
+                            )
                     elif not self._clear_metadata(pane_id, "work cleared"):
                         self._last_probe.pop(pane_id, None)
                     return True
@@ -1884,5 +1907,6 @@ def build_daemon(config: Config, client=None) -> Daemon:
         deny=config.deny,
         on_snapshot=StateStore().write,
         progress=progress_label if config.progress_enabled else None,
+        semantic_holds=config.semantic_holds_enabled,
         stream_factory=lambda subscriptions: herdr_socket.EventStream(subscriptions),
     )

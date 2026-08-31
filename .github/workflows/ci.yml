@@ -6,6 +6,21 @@ on:
   pull_request:
 
 jobs:
+  herdr-api-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, preview]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify Herdr ${{ matrix.channel }} API contract
+        run: python scripts/check_herdr_api.py --channel ${{ matrix.channel }}
+
   test:
     runs-on: ubuntu-latest
     strategy:
