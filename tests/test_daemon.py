@@ -120,6 +120,9 @@ def make_daemon(client, probes=(), **kw):
     kw.setdefault("clock", lambda: 0.0)
     kw.setdefault("enrich", _ENRICH)
     kw.setdefault("startup_replay_quiet_s", 0.0)
+    # Most legacy state-machine tests exercise the explicit compatibility
+    # mode. Production defaults are covered separately below.
+    kw.setdefault("semantic_holds", True)
     return Daemon(client, list(probes), **kw)
 
 
@@ -173,6 +176,76 @@ def test_asserts_working_when_pending():
     assert "w1:p1" in d.managed
     assert d.managed["w1:p1"].kind == "hold"
     assert d.managed["w1:p1"].terminal_id == "term-w1:p1"
+
+
+def test_default_mode_reports_idle_pending_work_as_metadata_only():
+    client = FakeClient([_agent(status="idle")])
+    d = Daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        clock=lambda: 0.0,
+        enrich=_ENRICH,
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+
+    d._reprobe_sweep()
+
+    assert client.reports == []
+    assert client.releases == []
+    assert client.metadata_tokens == [
+        ("w1:p1", {"waiting_on": "⏳ review"}, 1000)
+    ]
+    assert d.managed["w1:p1"].kind == "idle-meta"
+
+
+def test_metadata_only_mode_does_not_churn_idle_token_without_changes():
+    client = FakeClient([_agent(status="idle")])
+    probe = StaticProbe(Pending("review", 30, "roborev"))
+    d = make_daemon(
+        client,
+        [probe],
+        semantic_holds=False,
+        reprobe_interval_s=0,
+    )
+    seed(d, client)
+
+    d._reprobe_sweep()
+    d._reprobe_sweep()
+
+    assert client.reports == []
+    assert len(client.metadata_tokens) == 1
+
+
+def test_metadata_only_mode_releases_an_adopted_legacy_hold():
+    client = FakeClient([_agent(status="working")])
+    d = make_daemon(
+        client,
+        [StaticProbe(Pending("review", 30, "roborev"))],
+        semantic_holds=False,
+        reprobe_interval_s=0,
+    )
+    d.adopt(
+        [{
+            "pane_id": "w1:p1",
+            "terminal_id": "term-w1:p1",
+            "agent": "claude",
+            "status": "⏳ old review",
+            "kind": "hold",
+        }]
+    )
+    client.agents["w1:p1"]["agent_status"] = "idle"
+    seed(d, client)
+
+    d._reprobe_sweep()
+
+    assert client.releases == ["w1:p1"]
+    assert client.metadata_tokens[-1] == (
+        "w1:p1",
+        {"waiting_on": "⏳ review"},
+        1000,
+    )
+    assert d.managed["w1:p1"].kind == "idle-meta"
 
 
 def test_foreign_session_owner_gets_idle_metadata_without_lifecycle_claim():
@@ -4075,4 +4148,6 @@ def test_build_daemon_constructs_with_new_wiring():
     assert len(d._probes) == 3
     assert d._resync_interval == 90.0
     assert d._progress_interval == 2.0
+    assert d._semantic_holds is False
+    assert d._progress is None
     assert d._stream_factory is not None

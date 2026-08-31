@@ -48,7 +48,13 @@ class Config:
     ci_cache_ttl_s: float = 10.0
     bgjobs_min_age_s: float = 5.0
     bgjobs_ignore: list[str] = field(default_factory=list)
-    progress_enabled: bool = True
+    # Claude task files are a useful but agent-specific implementation detail,
+    # so progress reporting is opt-in rather than part of the core watcher.
+    progress_enabled: bool = False
+    # Herdr integrations normally own lifecycle authority. Metadata is the
+    # safe, composable default; semantic holds remain an explicit compatibility
+    # option for unmanaged panes.
+    semantic_holds_enabled: bool = False
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
 
@@ -101,6 +107,12 @@ def load(path: str | None = None) -> Config:
             cfg.progress_interval_s,
             "progress.interval_s",
         )
+    lifecycle = data.get("lifecycle", {})
+    if (
+        isinstance(lifecycle, dict)
+        and isinstance(lifecycle.get("semantic_holds"), bool)
+    ):
+        cfg.semantic_holds_enabled = lifecycle["semantic_holds"]
     panes = data.get("panes", {})
     cfg.allow = list(panes.get("allow", []))
     cfg.deny = list(panes.get("deny", []))
