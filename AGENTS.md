@@ -1,10 +1,10 @@
 # AGENTS.md — herdwatch
 
-herdwatch is a background daemon that keeps [herdr](https://herdr.dev) agent
-panes shown as `working ⏳` while background work (CI, code review, jobs) is
-still pending after the agent goes idle — so a finished-looking pane isn't
-mistaken for a done one. This file tells a coding agent how to set it up on the
-**current machine**.
+herdwatch is a background daemon that adds a TTL-backed `waiting_on` label to
+[herdr](https://herdr.dev) agent panes while background work (CI, code review,
+jobs) is still pending after the agent goes idle. Herdeck renders that metadata
+as `WAITING`, while Herdr retains authoritative lifecycle ownership. This file
+tells a coding agent how to set it up on the **current machine**.
 
 ## Setup (run these in order)
 
@@ -74,7 +74,7 @@ A missing optional tool just disables its probe; it never blocks a pane.
 
 `~/.config/herdwatch/config.toml` — enable/disable probes, intervals, and
 per-pane `allow`/`deny`. `roborev`, `ci`, and `marker` are on by default;
-`bgjobs` is opt-in (set `enabled = true` under a `[probes.bgjobs]` table). The
+`bgjobs`, Claude task progress, and semantic lifecycle holds are opt-in. The
 file is usually not needed. See the README Config section for the full example.
 
 ## Conventions (for agents editing this repository)
