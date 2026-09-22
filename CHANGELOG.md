@@ -14,6 +14,15 @@
 - `herdwatch doctor` warns when herdr's Agent sidebar layout does not render
   `$waiting_on`, which herdr's default layout never does.
 
+### Fixed
+
+- Waiting labels no longer flicker off between refreshes: their TTL has a
+  180 s floor because a sweep with slow `gh`/roborev probes can take longer
+  than 2 × `reprobe_interval_s`. Labels are still cleared explicitly when
+  work ends.
+- `herdwatch doctor` no longer crashes on a herdr config whose `ui` or
+  `ui.sidebar` is a scalar.
+
 ### Compatibility
 
 - Validated against Herdr 0.9.1 stable (protocol 22).

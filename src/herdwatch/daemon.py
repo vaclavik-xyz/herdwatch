@@ -61,6 +61,13 @@ LIFECYCLE_RESYNC_KINDS = {
 MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
 TTL_MIN_MS = 1000
 TTL_MAX_MS = 86_400_000
+# Waiting labels are refreshed only when their pane is re-probed, and one
+# sweep can take minutes when external probes (gh, roborev) are slow. A TTL
+# of 2 × reprobe_interval_s then lapses between refreshes and the label
+# flickers off. Labels are cleared explicitly when work ends; the TTL only
+# bounds how long a crashed daemon can leave one behind, so a floor is safe.
+WAITING_TTL_FLOOR_MS = 180_000
+WAITING_KINDS = {"hold", "idle-meta", "done", "active-meta"}
 LIFECYCLE_RESYNC_DEBOUNCE_S = 0.25
 STARTUP_REPLAY_QUIET_S = 0.25
 STARTUP_REPLAY_MAX_S = 55.0
@@ -165,6 +172,8 @@ class Daemon:
             interval = max_interval if interval > 0 else 0.0
         interval = max(0.0, min(interval, max_interval))
         ttl = int(2 * interval * 1000)
+        if kind in WAITING_KINDS:
+            ttl = max(ttl, WAITING_TTL_FLOOR_MS)
         return max(TTL_MIN_MS, min(TTL_MAX_MS, ttl))
 
     def _eligible(self, pane_id: str) -> bool:
