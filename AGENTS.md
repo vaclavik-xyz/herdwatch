@@ -52,6 +52,14 @@ tells a coding agent how to set it up on the **current machine**.
 
    `herdwatch daemon running` and `launchd service installed` should now be ✓.
 
+5. **Make the label visible in herdr** (skip if the user only uses Herdeck):
+   if `doctor` warns `herdr sidebar shows $waiting_on`, add
+   `[{ token = "$waiting_on", fg = "#e0af68" }, "$progress"]` as an extra row
+   in `[ui.sidebar.agents] rows` of `~/.config/herdr/config.toml` (keep any
+   rows the user already has; herdr's defaults are listed in the README), then
+   run `herdr server reload-config`. Ask the user before editing their herdr
+   config.
+
 That's the whole setup — there is **no per-agent configuration**. herdwatch
 watches every herdr pane automatically and works for any agent herdr tracks.
 
@@ -73,7 +81,8 @@ A missing optional tool just disables its probe; it never blocks a pane.
 ## Config (optional)
 
 `~/.config/herdwatch/config.toml` — enable/disable probes, intervals, and
-per-pane `allow`/`deny`. `roborev`, `ci`, and `marker` are on by default;
+per-pane `allow`/`deny`. `roborev`, `ci`, `marker`, and `claude_tasks`
+(Claude Code's own background tasks) are on by default;
 `bgjobs`, Claude task progress, and semantic lifecycle holds are opt-in. The
 file is usually not needed. See the README Config section for the full example.
 

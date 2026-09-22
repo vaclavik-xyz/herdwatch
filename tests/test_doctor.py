@@ -5,7 +5,9 @@ from herdwatch.doctor import (
     Check,
     exit_code,
     format_report,
+    SIDEBAR_CHECK,
     run_checks,
+    sidebar_shows_waiting,
     to_json,
 )
 from herdwatch.herdr_socket import HerdrApiError, HerdrUnavailable
@@ -166,3 +168,32 @@ def test_doctor_server_api_error_preserves_diagnostic():
     assert "internal_error" in detail
     assert "snapshot unavailable" in detail
     assert "herdr update" not in detail
+
+
+def test_sidebar_check_warns_for_default_herdr_layout():
+    checks = _by_name(run_checks(**_base_kwargs(), snapshot=lambda: {"snapshot": {}}))
+    check = checks[SIDEBAR_CHECK]
+    assert check.ok is False and check.required is False
+    assert "$waiting_on" in check.detail
+
+
+def test_sidebar_check_passes_when_token_is_in_rows():
+    config = '[ui.sidebar.agents]\nrows = [["state_icon", "workspace"], ["agent"], ["$waiting_on"]]\n'
+    checks = _by_name(run_checks(
+        **_base_kwargs(),
+        snapshot=lambda: {"snapshot": {}},
+        herdr_config=lambda: config,
+    ))
+    assert checks[SIDEBAR_CHECK].ok is True
+
+
+def test_sidebar_shows_waiting_variants():
+    assert sidebar_shows_waiting(None) is False
+    assert sidebar_shows_waiting("not = [toml") is False
+    assert sidebar_shows_waiting('[ui]\nsidebar_collapsed_mode = "compact"\n') is False
+    assert sidebar_shows_waiting('[ui]\nsidebar = "compact"\n') is False
+    assert sidebar_shows_waiting('ui = "compact"\n') is False
+    styled = '[ui.sidebar.agents]\nrows = [[{ token = "$waiting_on", fg = "#e0af68" }]]\n'
+    assert sidebar_shows_waiting(styled) is True
+    by_agent = '[ui.sidebar.agents.rows_by_agent]\nclaude = [["agent", "$waiting_on"]]\n'
+    assert sidebar_shows_waiting(by_agent) is True

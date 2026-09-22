@@ -21,6 +21,7 @@ from .markers import MarkerStore
 from .models import PaneContext, PanePeer, Pending
 from .probes.bgjobs import BgJobsProbe
 from .probes.ci import CIProbe
+from .probes.claude_tasks import ClaudeTasksProbe
 from .probes.marker import MarkerProbe
 from .probes.roborev import RoborevProbe
 from .progress import progress_label
@@ -60,6 +61,13 @@ LIFECYCLE_RESYNC_KINDS = {
 MARKER_DIR = os.path.expanduser("~/.local/state/herdwatch/markers")
 TTL_MIN_MS = 1000
 TTL_MAX_MS = 86_400_000
+# Waiting labels are refreshed only when their pane is re-probed, and one
+# sweep can take minutes when external probes (gh, roborev) are slow. A TTL
+# of 2 × reprobe_interval_s then lapses between refreshes and the label
+# flickers off. Labels are cleared explicitly when work ends; the TTL only
+# bounds how long a crashed daemon can leave one behind, so a floor is safe.
+WAITING_TTL_FLOOR_MS = 180_000
+WAITING_KINDS = {"hold", "idle-meta", "done", "active-meta"}
 LIFECYCLE_RESYNC_DEBOUNCE_S = 0.25
 STARTUP_REPLAY_QUIET_S = 0.25
 STARTUP_REPLAY_MAX_S = 55.0
@@ -89,6 +97,12 @@ def _record_token(record: dict, key: str) -> str:
         return ""
     value = tokens.get(key)
     return value if isinstance(value, str) else ""
+
+
+def _session_value(record: dict) -> str | None:
+    session = record.get("agent_session")
+    value = session.get("value") if isinstance(session, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 class Daemon:
@@ -158,6 +172,8 @@ class Daemon:
             interval = max_interval if interval > 0 else 0.0
         interval = max(0.0, min(interval, max_interval))
         ttl = int(2 * interval * 1000)
+        if kind in WAITING_KINDS:
+            ttl = max(ttl, WAITING_TTL_FLOOR_MS)
         return max(TTL_MIN_MS, min(TTL_MAX_MS, ttl))
 
     def _eligible(self, pane_id: str) -> bool:
@@ -1123,6 +1139,9 @@ class Daemon:
             worktree_heads=gi.worktree_heads,
             repo_key=gi.repo_key,
             repo_peers=repo_peers,
+            agent_session=(
+                _session_value(rec) or self._session_cache.get(rec["pane_id"])
+            ),
         )
 
     def _contexts(self) -> dict[str, PaneContext]:
@@ -1190,12 +1209,41 @@ class Daemon:
             ]),
         )
 
-    def _fast_pending(self, pane_id: str) -> Pending | None:
-        """Return a probe's pane-only result without git enrichment."""
+    def _light_context(self, rec: dict) -> PaneContext:
+        """Context without git enrichment, for probes that read local state."""
+        cwd = rec.get("cwd") or rec.get("foreground_cwd") or ""
+        return PaneContext(
+            pane_id=rec["pane_id"],
+            agent=rec.get("agent") or "agent",
+            cwd=cwd,
+            status=rec.get("agent_status") or "unknown",
+            head_sha=None,
+            branch=None,
+            is_git_repo=False,
+            has_github_remote=False,
+            agent_session=(
+                _session_value(rec) or self._session_cache.get(rec["pane_id"])
+            ),
+        )
+
+    def _fast_pending(
+        self, pane_id: str, rec: dict | None = None
+    ) -> Pending | None:
+        """Return a cheap probe result without git enrichment.
+
+        Probes with `check_pane` need only the pane id. Probes that set
+        `local_only = True` read local files only, so they run against a
+        git-free context before slow network probes such as CI.
+        """
+        light = None
         for probe in self._probes:
             check_pane = getattr(probe, "check_pane", None)
             if not callable(check_pane):
-                continue
+                if not getattr(probe, "local_only", False) or rec is None:
+                    continue
+                if light is None:
+                    light = self._light_context(rec)
+                check_pane = lambda _pane_id, probe=probe: probe.check(light)
             try:
                 result = check_pane(pane_id)
             except Exception:
@@ -1304,7 +1352,7 @@ class Daemon:
             else:
                 return False
 
-        pending = self._fast_pending(pane_id) if fast else None
+        pending = self._fast_pending(pane_id, rec) if fast else None
         if fast_only and pending is None:
             return False
         if pending is not None:
@@ -1889,6 +1937,14 @@ def build_daemon(config: Config, client=None) -> Daemon:
         probes.append(RoborevProbe(cache))
     if config.probes.get("ci"):
         probes.append(CIProbe(cache))
+    if config.probes.get("claude_tasks"):
+        probes.append(
+            ClaudeTasksProbe(
+                process_info=client.pane_process_info,
+                max_age_s=config.claude_tasks_max_age_s,
+                extra_service_patterns=config.claude_tasks_ignore,
+            )
+        )
     if config.probes.get("bgjobs"):
         probes.append(
             BgJobsProbe(

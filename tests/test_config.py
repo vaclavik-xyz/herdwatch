@@ -5,7 +5,14 @@ from herdwatch.config import load
 
 def test_defaults_when_missing(tmp_path):
     cfg = load(str(tmp_path / "nope.toml"))
-    assert cfg.probes == {"roborev": True, "ci": True, "bgjobs": False, "marker": True}
+    assert cfg.probes == {
+        "roborev": True,
+        "ci": True,
+        "bgjobs": False,
+        "marker": True,
+        "claude_tasks": True,
+    }
+    assert cfg.claude_tasks_max_age_s == 6 * 3600
 
 
 def test_override(tmp_path):
@@ -225,3 +232,20 @@ def test_poll_interval_is_ignored_with_warning(tmp_path, caplog):
         cfg = load(path=str(p))
     assert not hasattr(cfg, "poll_interval_s")
     assert any("poll_interval_s" in r.message for r in caplog.records)
+
+
+def test_claude_tasks_subtable_tunes_and_disables(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[probes.claude_tasks]\nenabled = false\nmax_age_s = 600\nignore = ["tilt up"]\n')
+    cfg = load(str(p))
+    assert cfg.probes["claude_tasks"] is False
+    assert cfg.claude_tasks_max_age_s == 600
+    assert cfg.claude_tasks_ignore == ["tilt up"]
+
+
+def test_claude_tasks_invalid_max_age_keeps_default(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[probes.claude_tasks]\nmax_age_s = -1\n')
+    cfg = load(str(p))
+    assert cfg.probes["claude_tasks"] is True
+    assert cfg.claude_tasks_max_age_s == 6 * 3600

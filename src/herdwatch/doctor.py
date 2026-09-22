@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from typing import Callable
 
@@ -14,6 +15,13 @@ from . import herdr_socket
 from .herdr_socket import HerdrApiError, HerdrUnavailable
 from .service import PLIST_PATH  # single source of truth for the launchd plist path
 
+HERDR_CONFIG_PATH = os.path.expanduser("~/.config/herdr/config.toml")
+SIDEBAR_CHECK = "herdr sidebar shows $waiting_on"
+SIDEBAR_HINT = (
+    "herdwatch labels are invisible in herdr's default sidebar; add "
+    '`["$waiting_on", "$progress"]` to [ui.sidebar.agents] rows '
+    "(see README) and run `herdr server reload-config`"
+)
 MIN_HERDR_VERSION = (0, 7, 4)
 HERDR_VERSION_CHECK = "herdr >= 0.7.4 (metadata tokens)"
 
@@ -46,13 +54,60 @@ def _list_procs() -> list[str]:
         return []
 
 
+def _row_tokens(rows) -> set[str]:
+    tokens = set()
+    if not isinstance(rows, list):
+        return tokens
+    for row in rows:
+        for entry in row if isinstance(row, list) else ():
+            if isinstance(entry, dict):
+                entry = entry.get("token")
+            if isinstance(entry, str):
+                tokens.add(entry)
+    return tokens
+
+
+def sidebar_shows_waiting(config_text: str | None) -> bool:
+    """Whether herdr's Agent sidebar layout renders the waiting_on token.
+
+    Herdr's default rows show only built-ins, so metadata tokens stay
+    invisible until the user adds them to `ui.sidebar.agents.rows` (or to
+    the Claude override in `rows_by_agent`).
+    """
+    if not config_text:
+        return False
+    try:
+        data = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError:
+        return False
+    agents = data
+    for key in ("ui", "sidebar", "agents"):
+        agents = agents.get(key) if isinstance(agents, dict) else None
+    if not isinstance(agents, dict):
+        return False
+    layouts = [agents.get("rows")]
+    by_agent = agents.get("rows_by_agent")
+    if isinstance(by_agent, dict):
+        layouts.extend(by_agent.values())
+    return any("$waiting_on" in _row_tokens(rows) for rows in layouts)
+
+
+def _read_herdr_config() -> str | None:
+    try:
+        with open(HERDR_CONFIG_PATH, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
 def _snapshot() -> dict:
     return herdr_socket.request("session.snapshot", {})
 
 
 def run_checks(*, which: Callable[[str], bool], run: Callable[[list[str]], tuple[int, str]],
                list_procs: Callable[[], list[str]], plist_path: str,
-               snapshot: Callable[[], dict]) -> list[Check]:
+               snapshot: Callable[[], dict],
+               herdr_config: Callable[[], str | None] = lambda: None) -> list[Check]:
     checks: list[Check] = []
 
     herdr = which("herdr")
@@ -103,6 +158,10 @@ def run_checks(*, which: Callable[[str], bool], run: Callable[[list[str]], tuple
         Check(HERDR_VERSION_CHECK, modern and snapshot_ok, True, detail_ver)
     )
 
+    sidebar = sidebar_shows_waiting(herdr_config())
+    checks.append(Check(SIDEBAR_CHECK, sidebar, False,
+                        "" if sidebar else SIDEBAR_HINT))
+
     gh = which("gh") and run(["gh", "auth", "status"])[0] == 0
     checks.append(Check("gh authenticated (CI probe)", bool(gh), False,
                         "" if gh else "optional: run `gh auth login` to enable the CI probe"))
@@ -124,7 +183,7 @@ def run_checks(*, which: Callable[[str], bool], run: Callable[[list[str]], tuple
 
 def diagnose() -> list[Check]:
     return run_checks(which=_which, run=_run, list_procs=_list_procs, plist_path=PLIST_PATH,
-                      snapshot=_snapshot)
+                      snapshot=_snapshot, herdr_config=_read_herdr_config)
 
 
 def format_report(checks: list[Check]) -> str:

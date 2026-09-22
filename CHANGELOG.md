@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `claude_tasks` probe (on by default): label idle Claude Code panes that
+  are still waiting on their own background work — background Bash
+  commands, async subagents, Monitors, and Workflows — reconstructed from
+  the session transcript. Long-running services such as dev servers are
+  ignored (extend with `[probes.claude_tasks] ignore`), launches from a
+  previous Claude process are discarded, and `max_age_s` caps forgotten
+  tasks.
+- `herdwatch doctor` warns when herdr's Agent sidebar layout does not render
+  `$waiting_on`, which herdr's default layout never does.
+
+### Fixed
+
+- Waiting labels no longer flicker off between refreshes: their TTL has a
+  180 s floor because a sweep with slow `gh`/roborev probes can take longer
+  than 2 × `reprobe_interval_s`. Labels are still cleared explicitly when
+  work ends.
+- Local-only probes (`claude_tasks`) label a pane on its idle/done edge
+  without waiting for git enrichment and slow CI probes.
+- `herdwatch doctor` no longer crashes on a herdr config whose `ui` or
+  `ui.sidebar` is a scalar.
+
+### Compatibility
+
+- Validated against Herdr 0.9.1 stable (protocol 22).
+
 ## 0.2.1 - 2026-08-31
 
 ### Added

@@ -16,8 +16,9 @@ nothing's happening, because the real work is off-screen. So a pane that *looks*
 finished isn't, and you can't trust the sidebar at a glance.
 
 herdwatch fixes that: while background work is still pending after an agent goes
-idle, it adds a `⏳` label saying what it is waiting on (CI, roborev review, a
-manual marker, or — opt-in — a background job). The label is TTL-backed display
+idle, it adds a `⏳` label saying what it is waiting on (CI, roborev review,
+Claude Code's own background tasks, a manual marker, or — opt-in — a
+background job). The label is TTL-backed display
 metadata: herdr and its official integrations remain the sole owners of the
 pane's real lifecycle state, while Herdeck derives `WAITING` from `waiting_on`.
 
@@ -69,6 +70,50 @@ daemon's pid, so `status` can tell a live snapshot from one a dead daemon left
 behind. Metadata rows need no crash recovery because their TTL self-cleans.
 When upgrading from a version that persisted a semantic hold, the daemon
 re-adopts and releases that legacy assertion before switching to metadata.
+
+## Showing the label in herdr's sidebar
+
+Herdr renders pane metadata tokens only where the Agent sidebar layout asks
+for them, and its default layout shows none. Add a row for herdwatch's
+tokens to `~/.config/herdr/config.toml` (the first two rows are herdr's
+defaults; an empty row disappears on its own):
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "machine", "workspace", "tab"],
+  ["agent"],
+  [{ token = "$waiting_on", fg = "#e0af68" }, "$progress"],
+]
+```
+
+Then run `herdr server reload-config`. `herdwatch doctor` warns while the
+layout does not render `$waiting_on`. Herdeck needs no configuration.
+
+## Claude Code background tasks
+
+Claude Code often ends its turn with "this is running in the background,
+I'll get back to you" — a background Bash command, an async subagent, a
+Monitor, or a Workflow. Herdr then shows the pane `idle` although the agent
+is really waiting. The `claude_tasks` probe (on by default) reads the
+session transcript (`~/.claude/projects/*/<session>.jsonl`, located through
+herdr's `agent_session` id), pairs each launch with its completion
+notification or `TaskStop`, and labels the pane `⏳ bg: <description>` (or
+`⏳ bg: N tasks`) until everything has reported back. No hooks or
+per-session setup are needed.
+
+To avoid permanent false labels it ignores:
+
+- long-running services nobody waits on — dev servers, `npm run dev`,
+  `python -m http.server`, `docker compose up`, … (add your own regexes
+  with `[probes.claude_tasks] ignore`);
+- launches older than the pane's current `claude` process (a resumed
+  session cannot still own them);
+- Monitors past their timeout, and anything older than `max_age_s`
+  (6 h by default).
+
+The transcript format is internal to Claude Code; the parser is tolerant and
+falls back to "nothing pending" on anything it does not recognise.
 
 ## Optional task progress in the sidebar
 
@@ -146,7 +191,7 @@ reprobe_interval_s = 15     # min seconds between probing the same pane
 semantic_holds = false      # default; true is compatibility mode for unmanaged panes
 
 [probes]
-ci = true                   # on by default: roborev, ci, marker
+ci = true                   # on by default: roborev, ci, marker, claude_tasks
 roborev = true              # bgjobs is OFF by default (opt-in below)
 
 # Per-probe tuning goes in its own table. Because TOML forbids a key that is
@@ -157,6 +202,12 @@ enabled = true              # opt in to background-job detection
 min_age_s = 5               # ignore just-spawned processes
 ignore = ["vite", "webpack"]  # extra process names to treat as "not a job"
                               # (added on top of the built-in defaults)
+
+[probes.claude_tasks]
+enabled = true              # Claude Code background tasks (default on)
+max_age_s = 21600           # forget launches that never reported back
+ignore = ["tilt up"]        # extra regexes for services that never finish
+                            # (added on top of the built-in dev-server list)
 
 [progress]
 enabled = false              # opt in to Claude Code task-file progress
@@ -182,7 +233,9 @@ names to skip.
   subscriptions, and named metadata tokens. There is no fallback for older
   metadata fields; `herdwatch doctor` checks this requirement.
 - **Herdeck provides the semantic `WAITING` view.** Herdr itself keeps the
-  authoritative `idle`/`done` state and the `waiting_on` token beside it.
+  authoritative `idle`/`done` state and the `waiting_on` token beside it,
+  and shows the token only once the sidebar layout includes `$waiting_on`
+  (see *Showing the label in herdr's sidebar*).
   Herdeck renders that combination as `WAITING`. Clients that ignore named
   metadata will see the original Herdr lifecycle state and no waiting overlay.
 - **`status` is a snapshot, not a live query.** `herdwatch status` reads the

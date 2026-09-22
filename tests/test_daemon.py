@@ -171,7 +171,7 @@ def test_asserts_working_when_pending():
     d._reprobe_sweep()
     assert client.reports == [("w1:p1", "working")]
     assert client.metadata_tokens == [
-        ("w1:p1", {"waiting_on": "⏳ review"}, 30000)
+        ("w1:p1", {"waiting_on": "⏳ review"}, 180_000)
     ]
     assert "w1:p1" in d.managed
     assert d.managed["w1:p1"].kind == "hold"
@@ -194,7 +194,7 @@ def test_default_mode_reports_idle_pending_work_as_metadata_only():
     assert client.reports == []
     assert client.releases == []
     assert client.metadata_tokens == [
-        ("w1:p1", {"waiting_on": "⏳ review"}, 1000)
+        ("w1:p1", {"waiting_on": "⏳ review"}, 180_000)
     ]
     assert d.managed["w1:p1"].kind == "idle-meta"
 
@@ -242,7 +242,7 @@ def test_metadata_only_mode_releases_an_adopted_legacy_hold():
     assert client.metadata_tokens[-1] == (
         "w1:p1",
         {"waiting_on": "⏳ review"},
-        1000,
+        180_000,
     )
     assert d.managed["w1:p1"].kind == "idle-meta"
 
@@ -260,7 +260,7 @@ def test_foreign_session_owner_gets_idle_metadata_without_lifecycle_claim():
 
     assert client.reports == []
     assert client.releases == []
-    assert client.metadata == [("w1:p1", "⏳ review", False, 1000)]
+    assert client.metadata == [("w1:p1", "⏳ review", False, 180_000)]
     assert d.managed["w1:p1"].kind == "idle-meta"
     assert d._rows()[0]["meta"] is True
 
@@ -282,7 +282,7 @@ def test_idle_metadata_upgrades_to_hold_when_foreign_owner_disappears():
     assert client.metadata_tokens[-1] == (
         "w1:p1",
         {"waiting_on": "⏳ review"},
-        1000,
+        180_000,
     )
     assert client.reports == [("w1:p1", "working")]
     assert d.managed["w1:p1"].kind == "hold"
@@ -303,7 +303,7 @@ def test_verified_hold_falls_back_when_foreign_owner_appears():
     d._reprobe_sweep()
 
     assert client.releases == []
-    assert client.metadata[-1] == ("w1:p1", "⏳ review", False, 1000)
+    assert client.metadata[-1] == ("w1:p1", "⏳ review", False, 180_000)
     assert d.managed["w1:p1"].kind == "idle-meta"
 
 
@@ -503,7 +503,7 @@ def test_ci_badge_targets_working_owner_then_follows_it_to_idle():
 
     assert client.reports == []
     assert client.metadata == [
-        ("w1:p2", "⏳ CI: CI", False, TTL_MIN_MS),
+        ("w1:p2", "⏳ CI: CI", False, 180_000),
     ]
     assert set(d.managed) == {"w1:p2"}
     assert d.managed["w1:p2"].kind == "active-meta"
@@ -537,7 +537,7 @@ def test_working_pane_uses_only_working_safe_pending_label():
     d._reprobe_sweep()
 
     assert client.metadata == [
-        ("w1:p1", "⏳ CI: CI", False, TTL_MIN_MS),
+        ("w1:p1", "⏳ CI: CI", False, 180_000),
     ]
 
 
@@ -922,7 +922,7 @@ def test_unverified_report_falls_back_when_foreign_owner_becomes_visible():
     d._reprobe_sweep()
 
     assert client.releases == []
-    assert client.metadata[-1] == ("w1:p1", "⏳ review", False, 1000)
+    assert client.metadata[-1] == ("w1:p1", "⏳ review", False, 180_000)
     assert d.managed["w1:p1"].kind == "idle-meta"
 
 
@@ -1125,7 +1125,7 @@ def test_done_pane_gets_metadata_not_hold():
     seed(d, client)
     d._reprobe_sweep()
     assert client.reports == []
-    assert client.metadata == [("w1:p1", "⏳ review", False, 30000)]
+    assert client.metadata == [("w1:p1", "⏳ review", False, 180_000)]
     assert d.managed["w1:p1"].kind == "done"
 
 
@@ -1155,7 +1155,7 @@ def test_done_metadata_refreshes_ttl_each_sweep():
     d._reprobe_sweep()
     sets = [metadata for metadata in client.metadata if not metadata[2]]
     assert len(sets) == 2
-    assert all(metadata[3] == 30000 for metadata in sets)
+    assert all(metadata[3] == 180_000 for metadata in sets)
 
 
 def test_done_to_idle_hands_over_to_hold():
@@ -1171,7 +1171,7 @@ def test_done_to_idle_hands_over_to_hold():
     assert client.metadata_tokens[-1] == (
         "w1:p1",
         {"waiting_on": "⏳ CI: ci"},
-        1000,
+        180_000,
     )
     assert client.reports[-1] == ("w1:p1", "working")
     assert d.managed["w1:p1"].kind == "hold"
@@ -1189,6 +1189,15 @@ def test_ttl_clamped_to_valid_range():
     assert d2._ttl_ms() == TTL_MAX_MS
     d3 = make_daemon(client, [], reprobe_interval_s=1e308)
     assert d3._ttl_ms() == TTL_MAX_MS
+
+
+def test_waiting_labels_have_ttl_floor_for_slow_sweeps():
+    d = make_daemon(FakeClient([]), [], reprobe_interval_s=15.0)
+    for kind in ("hold", "idle-meta", "done", "active-meta"):
+        assert d._ttl_ms(kind) == 180_000
+    assert d._ttl_ms("progress") == 30_000
+    slow = make_daemon(FakeClient([]), [], reprobe_interval_s=600.0)
+    assert slow._ttl_ms("idle-meta") == 1_200_000
 
 
 def test_progress_uses_metadata_not_report_agent():
@@ -1498,7 +1507,7 @@ def test_hold_pane_not_claimed_by_progress_sweep():
     d._progress_sweep()
     assert d.managed["w1:p1"].kind == "hold"
     assert client.metadata_tokens == [
-        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 1000)
+        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 180_000)
     ]
     assert client.reports == [("w1:p1", "working")]
 
@@ -1519,7 +1528,7 @@ def test_progress_pane_recovered_when_status_drifted():
     d._reprobe_sweep()
     assert client.metadata_tokens == [
         ("w1:p1", {"progress": None}, None),
-        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 1000),
+        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 180_000),
     ]
     assert d.managed["w1:p1"].kind == "hold"
 
@@ -1798,7 +1807,7 @@ def test_done_edge_event_labels_immediately():
     d._last_probe["w1:p1"] = 0.0
     client.agents["w1:p1"]["agent_status"] = "done"
     d.dispatch_event(_status_event(status="done"))
-    assert client.metadata == [("w1:p1", "⏳ review", False, 30000)]
+    assert client.metadata == [("w1:p1", "⏳ review", False, 180_000)]
 
 
 def test_working_edge_clears_done_metadata_without_new_hold():
@@ -1868,7 +1877,7 @@ def test_foreign_session_idle_metadata_self_echo_is_ignored():
 
     d.dispatch_event(_status_event(status="idle", custom="⏳ review"))
 
-    assert client.metadata == [("w1:p1", "⏳ review", False, 1000)]
+    assert client.metadata == [("w1:p1", "⏳ review", False, 180_000)]
     assert d._last_probe["w1:p1"] == last_probe
 
 
@@ -1889,7 +1898,7 @@ def test_progress_stop_event_hands_over_to_hold():
     d.dispatch_event(_status_event(status="idle"))
     assert client.metadata_tokens[-2:] == [
         ("w1:p1", {"progress": None}, None),
-        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 30000),
+        ("w1:p1", {"waiting_on": "⏳ CI: ci"}, 180_000),
     ]
     assert client.reports[-1] == ("w1:p1", "working")
     assert d.managed["w1:p1"].kind == "hold"
@@ -4144,9 +4153,70 @@ def test_build_daemon_constructs_with_new_wiring():
 
     cfg = Config(resync_interval_s=90.0, progress_interval_s=2.0)
     d = build_daemon(cfg, client=FakeC())
-    assert len(d._probes) == 3
+    assert [p.name for p in d._probes] == [
+        "marker", "roborev", "ci", "claude_tasks"
+    ]
     assert d._resync_interval == 90.0
     assert d._progress_interval == 2.0
     assert d._semantic_holds is False
     assert d._progress is None
     assert d._stream_factory is not None
+
+
+def test_context_carries_agent_session_for_claude_tasks_probe():
+    seen = []
+
+    class Probe:
+        name = "claude_tasks"
+
+        def check(self, ctx):
+            seen.append(ctx.agent_session)
+            return None
+
+    client = FakeClient([_claude_agent(status="idle", session="sess-1")])
+    d = make_daemon(client, [Probe()], reprobe_interval_s=0)
+    seed(d, client)
+    d._reprobe_sweep()
+    assert seen and seen[-1] == "sess-1"
+
+
+def test_context_falls_back_to_cached_session():
+    client = FakeClient([_claude_agent(status="idle", session="sess-1")])
+    d = make_daemon(client, [], reprobe_interval_s=0)
+    seed(d, client)
+    rec = _claude_agent(status="working", session=None)
+    assert d._context(rec).agent_session == "sess-1"
+    rec["agent_session"] = ["bad"]
+    assert d._context(rec).agent_session == "sess-1"
+
+
+def test_local_only_probe_labels_edge_without_slow_probes():
+    calls = []
+
+    class SlowProbe:
+        name = "ci"
+
+        def check(self, ctx):
+            calls.append("ci")
+            return Pending("CI: CI", 20, "ci")
+
+    class LocalProbe:
+        name = "claude_tasks"
+        local_only = True
+
+        def check(self, ctx):
+            calls.append(("local", ctx.agent_session, ctx.head_sha))
+            return Pending("bg: evals", 35, "claude_tasks")
+
+    client = FakeClient([_claude_agent(status="working", session="sess-1")])
+    d = make_daemon(
+        client, [SlowProbe(), LocalProbe()], semantic_holds=False
+    )
+    seed(d, client)
+    client.agents["w1:p1"]["agent_status"] = "idle"
+    d.dispatch_event({
+        "event": "pane.agent_status_changed",
+        "data": {"pane_id": "w1:p1", "agent_status": "idle"},
+    })
+    assert calls == [("local", "sess-1", None)]
+    assert d.managed["w1:p1"].label == "⏳ bg: evals"
