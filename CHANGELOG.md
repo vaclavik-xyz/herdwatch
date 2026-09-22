@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `claude_tasks` probe (on by default): label idle Claude Code panes that
+  are still waiting on their own background work — background Bash
+  commands, async subagents, Monitors, and Workflows — reconstructed from
+  the session transcript. Long-running services such as dev servers are
+  ignored (extend with `[probes.claude_tasks] ignore`), launches from a
+  previous Claude process are discarded, and `max_age_s` caps forgotten
+  tasks.
+- `herdwatch doctor` warns when herdr's Agent sidebar layout does not render
+  `$waiting_on`, which herdr's default layout never does.
+
+### Compatibility
+
+- Validated against Herdr 0.9.1 stable (protocol 22).
+
 ## 0.2.1 - 2026-08-31
 
 ### Added
