@@ -4189,3 +4189,34 @@ def test_context_falls_back_to_cached_session():
     rec["agent_session"] = ["bad"]
     assert d._context(rec).agent_session == "sess-1"
 
+
+def test_local_only_probe_labels_edge_without_slow_probes():
+    calls = []
+
+    class SlowProbe:
+        name = "ci"
+
+        def check(self, ctx):
+            calls.append("ci")
+            return Pending("CI: CI", 20, "ci")
+
+    class LocalProbe:
+        name = "claude_tasks"
+        local_only = True
+
+        def check(self, ctx):
+            calls.append(("local", ctx.agent_session, ctx.head_sha))
+            return Pending("bg: evals", 35, "claude_tasks")
+
+    client = FakeClient([_claude_agent(status="working", session="sess-1")])
+    d = make_daemon(
+        client, [SlowProbe(), LocalProbe()], semantic_holds=False
+    )
+    seed(d, client)
+    client.agents["w1:p1"]["agent_status"] = "idle"
+    d.dispatch_event({
+        "event": "pane.agent_status_changed",
+        "data": {"pane_id": "w1:p1", "agent_status": "idle"},
+    })
+    assert calls == [("local", "sess-1", None)]
+    assert d.managed["w1:p1"].label == "⏳ bg: evals"

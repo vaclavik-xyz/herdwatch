@@ -301,6 +301,9 @@ def format_label(tasks: list[Task]) -> str:
 
 class ClaudeTasksProbe:
     name = "claude_tasks"
+    # Reads only local files and herdr process info: the daemon may run it on
+    # idle/done edges without waiting for git enrichment or slow CI probes.
+    local_only = True
 
     def __init__(
         self,

@@ -1209,12 +1209,41 @@ class Daemon:
             ]),
         )
 
-    def _fast_pending(self, pane_id: str) -> Pending | None:
-        """Return a probe's pane-only result without git enrichment."""
+    def _light_context(self, rec: dict) -> PaneContext:
+        """Context without git enrichment, for probes that read local state."""
+        cwd = rec.get("cwd") or rec.get("foreground_cwd") or ""
+        return PaneContext(
+            pane_id=rec["pane_id"],
+            agent=rec.get("agent") or "agent",
+            cwd=cwd,
+            status=rec.get("agent_status") or "unknown",
+            head_sha=None,
+            branch=None,
+            is_git_repo=False,
+            has_github_remote=False,
+            agent_session=(
+                _session_value(rec) or self._session_cache.get(rec["pane_id"])
+            ),
+        )
+
+    def _fast_pending(
+        self, pane_id: str, rec: dict | None = None
+    ) -> Pending | None:
+        """Return a cheap probe result without git enrichment.
+
+        Probes with `check_pane` need only the pane id. Probes that set
+        `local_only = True` read local files only, so they run against a
+        git-free context before slow network probes such as CI.
+        """
+        light = None
         for probe in self._probes:
             check_pane = getattr(probe, "check_pane", None)
             if not callable(check_pane):
-                continue
+                if not getattr(probe, "local_only", False) or rec is None:
+                    continue
+                if light is None:
+                    light = self._light_context(rec)
+                check_pane = lambda _pane_id, probe=probe: probe.check(light)
             try:
                 result = check_pane(pane_id)
             except Exception:
@@ -1323,7 +1352,7 @@ class Daemon:
             else:
                 return False
 
-        pending = self._fast_pending(pane_id) if fast else None
+        pending = self._fast_pending(pane_id, rec) if fast else None
         if fast_only and pending is None:
             return False
         if pending is not None:

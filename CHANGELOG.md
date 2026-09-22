@@ -20,6 +20,8 @@
   180 s floor because a sweep with slow `gh`/roborev probes can take longer
   than 2 × `reprobe_interval_s`. Labels are still cleared explicitly when
   work ends.
+- Local-only probes (`claude_tasks`) label a pane on its idle/done edge
+  without waiting for git enrichment and slow CI probes.
 - `herdwatch doctor` no longer crashes on a herdr config whose `ui` or
   `ui.sidebar` is a scalar.
 
