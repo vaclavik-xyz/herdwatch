@@ -40,7 +40,11 @@ RESPONSE_FIELDS = {
         "tokens",
         "agent_session",
     },
-    "PaneProcessInfo": {"shell_pid", "foreground_process_group_id"},
+    "PaneProcessInfo": {
+        "shell_pid",
+        "foreground_process_group_id",
+        "foreground_processes",
+    },
 }
 SUBSCRIPTION_PARAMS = {
     "pane.agent_status_changed": {"type", "pane_id"},

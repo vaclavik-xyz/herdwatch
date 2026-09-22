@@ -12,8 +12,15 @@ log = logging.getLogger(__name__)
 DEFAULT_PATH = os.path.expanduser("~/.config/herdwatch/config.toml")
 # bgjobs is opt-in: on an agent multiplexer every pane is an agent, and agents
 # constantly spawn subprocesses, so descendant-scanning yields false positives.
-# The reliable signals (CI, roborev, markers) are on by default.
-_DEFAULT_PROBES = {"roborev": True, "ci": True, "bgjobs": False, "marker": True}
+# The reliable signals (CI, roborev, markers, and Claude Code's own background
+# task bookkeeping) are on by default.
+_DEFAULT_PROBES = {
+    "roborev": True,
+    "ci": True,
+    "bgjobs": False,
+    "marker": True,
+    "claude_tasks": True,
+}
 _MAX_RUNTIME_INTERVAL_S = 43_200.0
 
 
@@ -48,6 +55,10 @@ class Config:
     ci_cache_ttl_s: float = 10.0
     bgjobs_min_age_s: float = 5.0
     bgjobs_ignore: list[str] = field(default_factory=list)
+    # Safety net for launches whose completion never reached the transcript.
+    claude_tasks_max_age_s: float = 6 * 3600.0
+    # Extra regexes for long-running background services to ignore.
+    claude_tasks_ignore: list[str] = field(default_factory=list)
     # Claude task files are a useful but agent-specific implementation detail,
     # so progress reporting is opt-in rather than part of the core watcher.
     progress_enabled: bool = False
@@ -98,6 +109,19 @@ def load(path: str | None = None) -> Config:
     if isinstance(bg, dict):
         cfg.bgjobs_min_age_s = float(bg.get("min_age_s", cfg.bgjobs_min_age_s))
         cfg.bgjobs_ignore = list(bg.get("ignore", cfg.bgjobs_ignore))
+    claude_tasks = probes_data.get("claude_tasks")
+    if isinstance(claude_tasks, dict) and isinstance(
+        claude_tasks.get("ignore"), list
+    ):
+        cfg.claude_tasks_ignore = [
+            str(pattern) for pattern in claude_tasks["ignore"]
+        ]
+    if isinstance(claude_tasks, dict) and "max_age_s" in claude_tasks:
+        cfg.claude_tasks_max_age_s = _positive_interval(
+            claude_tasks["max_age_s"],
+            cfg.claude_tasks_max_age_s,
+            "probes.claude_tasks.max_age_s",
+        )
     prog = data.get("progress", {})
     if isinstance(prog, dict) and isinstance(prog.get("enabled"), bool):
         cfg.progress_enabled = prog["enabled"]

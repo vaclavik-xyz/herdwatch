@@ -4144,9 +4144,38 @@ def test_build_daemon_constructs_with_new_wiring():
 
     cfg = Config(resync_interval_s=90.0, progress_interval_s=2.0)
     d = build_daemon(cfg, client=FakeC())
-    assert len(d._probes) == 3
+    assert [p.name for p in d._probes] == [
+        "marker", "roborev", "ci", "claude_tasks"
+    ]
     assert d._resync_interval == 90.0
     assert d._progress_interval == 2.0
     assert d._semantic_holds is False
     assert d._progress is None
     assert d._stream_factory is not None
+
+
+def test_context_carries_agent_session_for_claude_tasks_probe():
+    seen = []
+
+    class Probe:
+        name = "claude_tasks"
+
+        def check(self, ctx):
+            seen.append(ctx.agent_session)
+            return None
+
+    client = FakeClient([_claude_agent(status="idle", session="sess-1")])
+    d = make_daemon(client, [Probe()], reprobe_interval_s=0)
+    seed(d, client)
+    d._reprobe_sweep()
+    assert seen and seen[-1] == "sess-1"
+
+
+def test_context_falls_back_to_cached_session():
+    client = FakeClient([_claude_agent(status="idle", session="sess-1")])
+    d = make_daemon(client, [], reprobe_interval_s=0)
+    seed(d, client)
+    rec = _claude_agent(status="working", session=None)
+    assert d._context(rec).agent_session == "sess-1"
+    rec["agent_session"] = ["bad"]
+    assert d._context(rec).agent_session == "sess-1"

@@ -21,6 +21,7 @@ from .markers import MarkerStore
 from .models import PaneContext, PanePeer, Pending
 from .probes.bgjobs import BgJobsProbe
 from .probes.ci import CIProbe
+from .probes.claude_tasks import ClaudeTasksProbe
 from .probes.marker import MarkerProbe
 from .probes.roborev import RoborevProbe
 from .progress import progress_label
@@ -89,6 +90,12 @@ def _record_token(record: dict, key: str) -> str:
         return ""
     value = tokens.get(key)
     return value if isinstance(value, str) else ""
+
+
+def _session_value(record: dict) -> str | None:
+    session = record.get("agent_session")
+    value = session.get("value") if isinstance(session, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 class Daemon:
@@ -1123,6 +1130,9 @@ class Daemon:
             worktree_heads=gi.worktree_heads,
             repo_key=gi.repo_key,
             repo_peers=repo_peers,
+            agent_session=(
+                _session_value(rec) or self._session_cache.get(rec["pane_id"])
+            ),
         )
 
     def _contexts(self) -> dict[str, PaneContext]:
@@ -1889,6 +1899,14 @@ def build_daemon(config: Config, client=None) -> Daemon:
         probes.append(RoborevProbe(cache))
     if config.probes.get("ci"):
         probes.append(CIProbe(cache))
+    if config.probes.get("claude_tasks"):
+        probes.append(
+            ClaudeTasksProbe(
+                process_info=client.pane_process_info,
+                max_age_s=config.claude_tasks_max_age_s,
+                extra_service_patterns=config.claude_tasks_ignore,
+            )
+        )
     if config.probes.get("bgjobs"):
         probes.append(
             BgJobsProbe(

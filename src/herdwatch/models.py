@@ -49,3 +49,6 @@ class PaneContext:
     # Other eligible panes backed by the same local repository. Probes that
     # represent exclusive work can use this to choose one owning pane.
     repo_peers: tuple[PanePeer, ...] = ()
+    # Native agent session id reported by an official herdr integration
+    # (e.g. the Claude Code session uuid), when known.
+    agent_session: str | None = None
