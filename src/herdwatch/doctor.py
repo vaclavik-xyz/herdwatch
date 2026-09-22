@@ -80,7 +80,9 @@ def sidebar_shows_waiting(config_text: str | None) -> bool:
         data = tomllib.loads(config_text)
     except tomllib.TOMLDecodeError:
         return False
-    agents = data.get("ui", {}).get("sidebar", {}).get("agents", {})
+    agents = data
+    for key in ("ui", "sidebar", "agents"):
+        agents = agents.get(key) if isinstance(agents, dict) else None
     if not isinstance(agents, dict):
         return False
     layouts = [agents.get("rows")]

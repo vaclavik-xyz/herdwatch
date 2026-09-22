@@ -191,6 +191,8 @@ def test_sidebar_shows_waiting_variants():
     assert sidebar_shows_waiting(None) is False
     assert sidebar_shows_waiting("not = [toml") is False
     assert sidebar_shows_waiting('[ui]\nsidebar_collapsed_mode = "compact"\n') is False
+    assert sidebar_shows_waiting('[ui]\nsidebar = "compact"\n') is False
+    assert sidebar_shows_waiting('ui = "compact"\n') is False
     styled = '[ui.sidebar.agents]\nrows = [[{ token = "$waiting_on", fg = "#e0af68" }]]\n'
     assert sidebar_shows_waiting(styled) is True
     by_agent = '[ui.sidebar.agents.rows_by_agent]\nclaude = [["agent", "$waiting_on"]]\n'
