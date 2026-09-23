@@ -480,13 +480,12 @@ def test_ci_badge_targets_working_owner_then_follows_it_to_idle():
     )
 
     def run_gh(cwd, branch):
-        if branch == "feat/x":
-            return [{
-                "headSha": "def",
-                "status": "in_progress",
-                "workflowName": "CI",
-            }]
-        return []
+        return [{
+            "headSha": "def",
+            "status": "in_progress",
+            "workflowName": "CI",
+            "headBranch": "feat/x",
+        }]
 
     probe = CIProbe(TTLCache(ttl_s=10, clock=lambda: 0.0), run_gh=run_gh)
     d = make_daemon(
@@ -589,7 +588,8 @@ def test_status_event_uses_repo_wide_context_for_ci_owner():
             "headSha": "def",
             "status": "in_progress",
             "workflowName": "CI",
-        }] if branch == "feat/x" else [],
+            "headBranch": "feat/x",
+        }],
     )
     d = make_daemon(
         client,
@@ -4220,3 +4220,41 @@ def test_local_only_probe_labels_edge_without_slow_probes():
     })
     assert calls == [("local", "sess-1", None)]
     assert d.managed["w1:p1"].label == "⏳ bg: evals"
+
+
+def test_resync_labels_idle_edge_missed_by_event_stream():
+    class LocalProbe:
+        name = "claude_tasks"
+        local_only = True
+
+        def check(self, ctx):
+            return Pending("bg: evals", 35, "claude_tasks")
+
+    client = FakeClient([_claude_agent(status="working", session="sess-1")])
+    d = make_daemon(client, [LocalProbe()], semantic_holds=False)
+    seed(d, client)
+    client.agents["w1:p1"]["agent_status"] = "idle"
+
+    assert d._resync() is True
+
+    assert d.managed["w1:p1"].label == "⏳ bg: evals"
+
+
+def test_resync_does_not_probe_unchanged_idle_panes():
+    calls = []
+
+    class LocalProbe:
+        name = "claude_tasks"
+        local_only = True
+
+        def check(self, ctx):
+            calls.append(ctx.pane_id)
+            return None
+
+    client = FakeClient([_claude_agent(status="idle", session="sess-1")])
+    d = make_daemon(client, [LocalProbe()], semantic_holds=False)
+    seed(d, client)
+
+    d._resync()
+
+    assert calls == []

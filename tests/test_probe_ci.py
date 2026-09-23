@@ -52,18 +52,22 @@ def test_pending_when_run_matches_worktree_head_not_cwd_head():
     # cwd checkout sits on main@abc with no CI, the agent's worktree is on
     # feat/x@def where a PR run is in progress -> the pane must be held
     def run_gh(cwd, br):
-        return [{"headSha": "def", "status": "in_progress", "workflowName": "CI"}] \
-            if br == "feat/x" else []
+        return [{"headSha": "def", "status": "in_progress", "workflowName": "CI",
+                 "headBranch": "feat/x"}]
     probe = CIProbe(_cache(), run_gh=run_gh)
     p = probe.check(_ctx(worktree_heads=_TWO_HEADS))
     assert p is not None and p.label == "CI: CI"
 
 
-def test_queries_each_worktree_head_branch():
+def test_one_repo_wide_query_serves_all_worktree_heads():
+    # repos with dozens of worktrees must not cost one gh call per branch
     calls = []
     probe = CIProbe(_cache(), run_gh=lambda cwd, br: calls.append(br) or [])
-    assert probe.check(_ctx(worktree_heads=_TWO_HEADS)) is None
-    assert calls == ["main", "feat/x"]
+    heads = tuple(WorktreeHead(head_sha=f"s{i}", branch=f"b{i}") for i in range(40))
+    assert probe.check(_ctx(worktree_heads=heads, repo_key="/repo/.git")) is None
+    assert probe.check(_ctx(pane_id="w1:p2", worktree_heads=heads,
+                            repo_key="/repo/.git")) is None
+    assert calls == [None]
 
 
 def test_none_when_all_heads_only_completed():
@@ -73,22 +77,23 @@ def test_none_when_all_heads_only_completed():
     assert probe.check(_ctx(worktree_heads=_TWO_HEADS)) is None
 
 
-def test_malformed_runs_for_one_head_do_not_mask_another():
-    probe = CIProbe(_cache(), run_gh=lambda cwd, br: 1 if br == "main" else [
-        {"headSha": "def", "status": "queued", "workflowName": "ci"}])
-    p = probe.check(_ctx(worktree_heads=_TWO_HEADS))
-    assert p is not None and p.label == "CI: ci"
+def test_run_on_other_branch_with_same_sha_is_not_attributed():
+    # main@abc has no run; the run for sha abc was triggered on feat/y,
+    # which is not a local worktree branch
+    probe = CIProbe(_cache(), run_gh=lambda cwd, br: [
+        {"headSha": "abc", "status": "queued", "workflowName": "ci",
+         "headBranch": "feat/y"}])
+    assert probe.check(_ctx(worktree_heads=_TWO_HEADS)) is None
 
 
-def test_same_sha_on_two_branches_queries_both():
+def test_same_sha_on_two_branches_matches_run_branch():
     # a fresh worktree branch still sits on the same sha as main; the run
-    # exists only under the worktree's branch, so the branch-filtered query
-    # for main must not be reused for it (cache key must include the branch)
+    # exists only under the worktree's branch and must be attributed to it
     same_sha = (WorktreeHead(head_sha="abc", branch="main"),
                 WorktreeHead(head_sha="abc", branch="feat/x"))
     def run_gh(cwd, br):
-        return [{"headSha": "abc", "status": "in_progress", "workflowName": "ci"}] \
-            if br == "feat/x" else []
+        return [{"headSha": "abc", "status": "in_progress", "workflowName": "ci",
+                 "headBranch": "feat/x"}]
     probe = CIProbe(_cache(), run_gh=run_gh)
     p = probe.check(_ctx(worktree_heads=same_sha))
     assert p is not None and p.label == "CI: ci"
@@ -109,13 +114,12 @@ def test_pending_run_is_owned_by_only_working_repo_peer():
     )
 
     def run_gh(cwd, branch):
-        if branch == "feat/x":
-            return [{
-                "headSha": "def",
-                "status": "in_progress",
-                "workflowName": "CI",
-            }]
-        return []
+        return [{
+            "headSha": "def",
+            "status": "in_progress",
+            "workflowName": "CI",
+            "headBranch": "feat/x",
+        }]
 
     probe = CIProbe(_cache(), run_gh=run_gh)
     common = dict(
@@ -149,13 +153,12 @@ def test_pending_owner_is_retained_after_becoming_idle():
     )
 
     def run_gh(cwd, branch):
-        if branch == "feat/x":
-            return [{
-                "headSha": "abc",
-                "status": "queued",
-                "workflowName": "CI",
-            }]
-        return []
+        return [{
+            "headSha": "abc",
+            "status": "queued",
+            "workflowName": "CI",
+            "headBranch": "feat/x",
+        }]
 
     probe = CIProbe(_cache(), run_gh=run_gh)
     common = dict(worktree_heads=same_sha_heads, repo_key="/repo/.git")
@@ -187,7 +190,8 @@ def test_ambiguous_idle_repo_peers_do_not_receive_ci_badge():
         "headSha": "def",
         "status": "in_progress",
         "workflowName": "CI",
-    }] if branch == "feat/x" else [])
+        "headBranch": "feat/x",
+    }])
     common = dict(
         worktree_heads=_TWO_HEADS,
         repo_key="/repo/.git",
@@ -211,7 +215,8 @@ def test_exact_checkout_owner_wins_over_working_repo_peer():
         "headSha": "abc",
         "status": "in_progress",
         "workflowName": "CI",
-    }] if branch == "feat/x" else [])
+        "headBranch": "feat/x",
+    }])
     common = dict(
         worktree_heads=same_sha_heads,
         repo_key="/repo/.git",
@@ -245,7 +250,8 @@ def test_ambiguous_same_branch_peers_do_not_fall_back_to_other_working_pane():
         "headSha": "abc",
         "status": "in_progress",
         "workflowName": "CI",
-    }] if branch == "feat/x" else [])
+        "headBranch": "feat/x",
+    }])
     common = dict(
         worktree_heads=same_sha_heads,
         repo_key="/repo/.git",
@@ -277,7 +283,8 @@ def test_herdwatch_hold_is_not_counted_as_real_working_owner():
         "headSha": "def",
         "status": "in_progress",
         "workflowName": "CI",
-    }] if branch == "feat/x" else [])
+        "headBranch": "feat/x",
+    }])
     common = dict(
         worktree_heads=_TWO_HEADS,
         repo_key="/repo/.git",
@@ -308,7 +315,8 @@ def test_truncated_ci_label_recovers_existing_owner():
         "headSha": "def",
         "status": "in_progress",
         "workflowName": workflow,
-    }] if branch == "feat/x" else [])
+        "headBranch": "feat/x",
+    }])
     common = dict(
         worktree_heads=_TWO_HEADS,
         repo_key="/repo/.git",

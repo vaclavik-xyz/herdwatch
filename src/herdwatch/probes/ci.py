@@ -10,11 +10,16 @@ from ..models import PaneContext, PanePeer, Pending, WorktreeHead
 
 PRIORITY = 20
 _ACTIVE = {"queued", "in_progress"}
+# One repository-wide query serves every worktree head. Active runs are the
+# newest ones, so a generous limit covers them even in busy repositories;
+# per-branch queries cost one ~1 s `gh` call per worktree (dozens in repos
+# with many worktrees) and stalled the single-threaded daemon for minutes.
+REPO_RUN_LIMIT = "100"
 
 
 def default_run_gh(cwd: str, branch: str | None) -> list[dict]:
-    args = ["gh", "run", "list", "--limit", "20",
-            "--json", "status,headSha,workflowName"]
+    args = ["gh", "run", "list", "--limit", REPO_RUN_LIMIT if not branch else "20",
+            "--json", "status,headSha,headBranch,workflowName"]
     if branch:
         args += ["--branch", branch]
     try:
@@ -120,18 +125,29 @@ class CIProbe:
         # (and its PR CI) often lives on a branch in a linked worktree while
         # the pane cwd stays on the main checkout
         heads = ctx.worktree_heads or (WorktreeHead(ctx.head_sha, ctx.branch),)
+        runs = self._cache.get_or(
+            ("ci", ctx.repo_key or ctx.cwd),
+            lambda: self._run_gh(ctx.cwd, None))
+        if not isinstance(runs, list):
+            return None
         for head in heads:
             key = (ctx.repo_key or ctx.cwd, head.head_sha, head.branch)
-            runs = self._cache.get_or(
-                ("ci", ctx.cwd, head.head_sha, head.branch),
-                lambda br=head.branch: self._run_gh(ctx.cwd, br))
-            if not isinstance(runs, list):
-                continue
             active_run = None
             for run in runs:
                 if not isinstance(run, dict):
                     continue
-                if run.get("headSha") == head.head_sha and run.get("status") in _ACTIVE:
+                run_branch = run.get("headBranch")
+                if (
+                    run.get("headSha") == head.head_sha
+                    and run.get("status") in _ACTIVE
+                    # the same sha can sit on several worktree branches;
+                    # attribute the run to the branch it was triggered on
+                    and (
+                        head.branch is None
+                        or not run_branch
+                        or run_branch == head.branch
+                    )
+                ):
                     active_run = run
                     break
             if active_run is None:
