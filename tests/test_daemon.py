@@ -4221,3 +4221,40 @@ def test_local_only_probe_labels_edge_without_slow_probes():
     assert calls == [("local", "sess-1", None)]
     assert d.managed["w1:p1"].label == "⏳ bg: evals"
 
+
+def test_resync_labels_idle_edge_missed_by_event_stream():
+    class LocalProbe:
+        name = "claude_tasks"
+        local_only = True
+
+        def check(self, ctx):
+            return Pending("bg: evals", 35, "claude_tasks")
+
+    client = FakeClient([_claude_agent(status="working", session="sess-1")])
+    d = make_daemon(client, [LocalProbe()], semantic_holds=False)
+    seed(d, client)
+    client.agents["w1:p1"]["agent_status"] = "idle"
+
+    assert d._resync() is True
+
+    assert d.managed["w1:p1"].label == "⏳ bg: evals"
+
+
+def test_resync_does_not_probe_unchanged_idle_panes():
+    calls = []
+
+    class LocalProbe:
+        name = "claude_tasks"
+        local_only = True
+
+        def check(self, ctx):
+            calls.append(ctx.pane_id)
+            return None
+
+    client = FakeClient([_claude_agent(status="idle", session="sess-1")])
+    d = make_daemon(client, [LocalProbe()], semantic_holds=False)
+    seed(d, client)
+
+    d._resync()
+
+    assert calls == []

@@ -24,6 +24,12 @@
   without waiting for git enrichment and slow CI probes.
 - `herdwatch doctor` no longer crashes on a herdr config whose `ui` or
   `ui.sidebar` is a scalar.
+- The CI probe issues one repository-wide `gh run list` instead of one call
+  per worktree branch. Repositories with dozens of worktrees made a single
+  probe take 25–45 s and a sweep several minutes, blocking the daemon loop
+  so idle panes waited minutes for their label.
+- A snapshot resync that absorbs a missed idle/done edge now runs the cheap
+  fast-path probes for that pane instead of leaving it to the next sweep.
 
 ### Compatibility
 

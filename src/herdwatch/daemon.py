@@ -850,6 +850,10 @@ class Daemon:
             if a.get("terminal_id")
         }
         self._reconcile_books(records, by_terminal)
+        previous_status = {
+            pane_id: rec.get("agent_status")
+            for pane_id, rec in self._registry.items()
+        }
         self._registry = records
         for rec in records.values():
             self._remember_record(rec)
@@ -868,6 +872,19 @@ class Daemon:
         ):
             self._stream.close()
             self._stream = None  # run loop re-bootstraps with the new pane set
+        # A status event can be lost (stream reconnect, busy loop) and this
+        # snapshot then silently absorbs the idle/done edge, leaving the pane
+        # to wait for a full sweep. Give such edges the cheap fast-path check.
+        for pane_id, rec in records.items():
+            status = rec.get("agent_status")
+            if (
+                status in ("idle", "done")
+                and pane_id in previous_status
+                and previous_status[pane_id] != status
+                and pane_id not in self.managed
+            ):
+                self._last_probe.pop(pane_id, None)
+                self._probe_pane(pane_id, fast=True, fast_only=True)
         self._publish()
         return True
 
