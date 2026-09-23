@@ -1,6 +1,6 @@
 # herdwatch brand assets
 
-- `herdwatch-icon.svg` / `.png` — square application and repository icon.
+- `favicon.svg` / `.png` — square favicon, application, and repository icon.
 - `herdwatch-logo.svg` / `.png` — horizontal logo lockup on white.
 - `herdwatch-og.svg` / `.png` — 1200 × 630 social preview artwork.
 - `herdwatch-brand-board.png` — selected source direction showing the full icon, logo, and OG family.
